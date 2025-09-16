@@ -1,0 +1,55 @@
+{
+  "name": "dlv-sim",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "test": "node --import=tsx --max-old-space-size=18192 --expose-gc ./node_modules/mocha/bin/mocha --extension ts",
+    "start": "node --import=tsx src/main.ts",
+    "build": "esbuild src/main.ts --bundle --outfile=dist/main.js --minify --format=esm",
+    "download": "npx tsx scripts/events_downloader.ts",
+    "update": "npx tsx scripts/events_updater.ts",
+    "postinstall": "patch-package",
+    "dashboard": "npx tsx scripts/rebalance_plotting.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/bn.js": "^5.1.0",
+    "@types/chai": "^4.2.21",
+    "@types/chai-as-promised": "^7.1.4",
+    "@types/mocha": "^9.0.0",
+    "@types/node": "^22.5.4",
+    "bn.js": "^5.2.0",
+    "chai": "^4.3.4",
+    "chai-as-promised": "^7.1.1",
+    "esbuild": "^0.23.0",
+    "mocha": "^10.4.0",
+    "mochawesome": "^7.1.3",
+    "patch-package": "^8.0.0",
+    "ts-node": "^10.9.1",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3"
+  },
+  "type": "module",
+  "dependencies": {
+    "@bella-defintech/uniswap-v3-simulator": "^0.1.5",
+    "date-fns": "^2.30.0",
+    "date-fns-tz": "^2.0.0",
+    "dayjs": "^1.11.11",
+    "decimal.js-light": "^2.5.1",
+    "dotenv": "^16.4.5",
+    "jsbi": "3.1.6",
+    "knex": "^3.1.0",
+    "sqlite3": "^5.1.7"
+  },
+  "mocha": {
+    "colors": true,
+    "spec": [
+      "test/**/DLV.test.ts"
+    ],
+    "reporter": "mochawesome",
+    "timeout": 3600000
+  }
+}
