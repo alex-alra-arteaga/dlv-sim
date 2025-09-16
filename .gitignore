@@ -144,4 +144,6 @@ mochawesome-report/
 #prettier ignore
 .prettierignore
 
+# custom
 rebalance_log_usdc_wbtc_3000.db
+rebalance_dashboard.html

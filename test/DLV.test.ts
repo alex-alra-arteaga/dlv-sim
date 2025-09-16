@@ -232,16 +232,25 @@ describe("DLV Strategy", function () {
 
 async function isWithinCrDeviationThreshold(vault: AlphaProVault): Promise<boolean> {
   const crPercent = await vault.collateralRatio(); // returns percent, e.g. ~200
-  const maxDeviationThreshold = dlvConfig.deviationThreshold ?? 0;
+  const thresholdAbove = dlvConfig.deviationThresholdAbove ?? 0;
+  const thresholdBelow = dlvConfig.deviationThresholdBelow ?? 0;
 
-  if (maxDeviationThreshold === 0) return true;
+  if (thresholdAbove === 0 && thresholdBelow === 0) return true;
   // if infinite collateral ratio (no debt), consider it within threshold
   if (!Number.isFinite(crPercent)) return true;
 
   // TARGET_CR is WAD (e.g., 2e18); convert to percent (e.g., 200)
   const TARGET_CR_PERCENT = Number(TARGET_CR) / 1e16;
 
-  const deviation = Math.abs((crPercent - TARGET_CR_PERCENT) / TARGET_CR_PERCENT);
-  // console.log(`Current CR: ${crPercent.toFixed(2)}%, deviation: ${(deviation * 100).toFixed(2)}%`, 'max allowed:', (maxDeviationThreshold * 100).toFixed(2) + '%');
-  return deviation < maxDeviationThreshold;
+  if (crPercent > TARGET_CR_PERCENT) {
+    if (thresholdAbove === 0) return true;
+    const deviation = (crPercent - TARGET_CR_PERCENT) / TARGET_CR_PERCENT;
+    return deviation < thresholdAbove;
+  } else if (crPercent < TARGET_CR_PERCENT) {
+    if (thresholdBelow === 0) return true;
+    const deviation = (TARGET_CR_PERCENT - crPercent) / TARGET_CR_PERCENT;
+    return deviation < thresholdBelow;
+  } else {
+    return true; // exactly at target
+  }
 }

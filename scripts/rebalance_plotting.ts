@@ -195,7 +195,7 @@ function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: 
   </div>
 
   <div class="row">
-    <div class="card"><h2>Vault vs Hold (0.01 WBTCT)</h2><div id="perf"></div></div>
+    <div class="card"><h2>Vault vs Hold (0.01 ${payload.a0})</h2><div id="perf"></div></div>
     <div class="card"><h2>Position Ranges (wide/base/limit)</h2><div id="ranges"></div></div>
     <div class="card"><h2>${payload.a0} vs ${payload.a1} Share</h2><div id="shares"></div></div>
     <div class="card"><h2>Collateral Ratio (target 200%)</h2><div id="cr"></div></div>
@@ -204,7 +204,6 @@ function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: 
     <div class="card"><h2>Portfolio Value Breakdown</h2><div id="portfolio"></div></div>
     <div class="card"><h2>Collateral Ratio Changes</h2><div id="crchange"></div></div>
   </div>
-
 <script>
 const PAYLOAD = ${dataJSON};
 
@@ -259,7 +258,7 @@ function perfSeries(data, grain) {
   const common = { ...hoverLines };
   return [
     { ...common, name:'Vault %', x, y: vaultPct, line:{color:'var(--blue)'} },
-    { ...common, name:'Hold % (0.01 ${payload.a1})', x, y: holdPct, line:{color:'var(--pink)'} }
+    { ...common, name:'Hold % (0.01 ${payload.a0})', x, y: holdPct, line:{color:'var(--pink)'} }
   ];
 }
 

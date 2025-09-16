@@ -16,11 +16,12 @@ export const charmConfig: VaultParams = {
   minTickMove: 0 // wouldn't change it
 };
 
-// Leave either period or deviationThreshold undefined to disable that condition
+// Leave either period or deviationThresholds undefined to disable that condition
 // If both are defined, rebalances will be triggered when either condition is met
 export const dlvConfig = {
-  period: 60 * 86400, // TODO if set very often it may be possible for rebalanceDebt::deposit to revert because of one of the amounts being 0
-  deviationThreshold: undefined, // 0.1 -> 10%
+  period: undefined, // TODO if set very often it may be possible for rebalanceDebt::deposit to revert because of one of the amounts being 0
+  deviationThresholdAbove: 0.2, // 0.2 -> 20% above 200%
+  deviationThresholdBelow: 0.05, // 0.05 -> 5% below 200%
   debtToVolatileSwapFee: 0.0015, // 0.15%
 };
 
