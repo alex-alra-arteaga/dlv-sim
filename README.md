@@ -1,60 +1,63 @@
-- Fork EVM at x timestamp
-- Deploy DLV and ALM with x parameters
-- Simulate uniswap price data movement as arbitrage volume
-    - I have the hourly data of fees
+# DLV-Sim
 
+DLV-Sim is a simulation tool for modeling custom Uniswap V3 strategies. You can plug different automated liquidity management (ALM), representd by 'accounts'.
+It allows users to simulate complex strategies against historical behaviour of any Uniswap V3 pool.
 
-- The strategy will have a module for ALM rebalancing, and another for DLV rebalancing
-- Tester has to add the Charm vault config
+This specific  simulation mocks a Charm Vault being used as collateral, targeting a CR equivalent to 2x leverage and a 50:50 LP ratio via Charm passive rebalancing.
 
-- The program has to look at the current tick, and check if any of the liquidity of the Charm vault is there, if yes, check which % and give fees to the user.
+## Features
 
-# Architectural decisions
+- **Uniswap V3 Recreation**: Deploys a fresh Uniswap V3 instance for accurate simulation without forking existing chains.
+It offers unparalled speed, you can run 5 years data, recreating swaps|mints|burns in the same exact order it happened, in around 2 minutes of execution.
+- **Rebalance Simulation**: Tracks DLV and ALM rebalances with visual plotting on the strategy performance and characteristics.
+- **Extensible Design**: Built with compatible of new strategies with unique features, with built-in advanced plotting.
 
-Instead of forking the targeting chain, we recreate the UniswapV3 deployment from 0
+## Installation
 
+1. Clone the repository.
 
-# node_modules/ changes
+2. Install dependencies:
+    ```bash
+    yarn install
+    ```
 
-client/MainnetDataDownloader.js
+3. Set up environment variables (e.g., for RPC endpoints) in a `.env` file.
 
-```javascript
-    async queryInitializationBlockNumber(poolAddress, batchSize = 5000) {
-      const pool = await this.getCorePoolContarct(poolAddress);
-      const topic = pool.filters.Initialize();
-      const latest = await this.RPCProvider.getBlockNumber();
+## Usage
 
-      for (let from = 0; from <= latest; from += (batchSize + 1)) {
-        console.log(`Searching for Initialize event from block ${from} to ${Math.min(from + batchSize, latest)}`);
-        const to = Math.min(from + batchSize, latest);
-        const logs = await pool.queryFilter(topic, from, to);
-        if (logs.length) return logs[0].blockNumber;
-      }
-      throw new Error("Initialize event not found");
-    }
+Run the simulation:
+```bash
+yarn simulate
 ```
 
-util/DateUtils.js
+## Configuration
 
-```javascript
-function getNextHour(date) {
-    return new Date(date.getTime() + 60 * 60 * 1000);
-}
-function getNext4Hour(date) {
-    return new Date(date.getTime() + 4 * 60 * 60 * 1000);
-}
-exports.getNext4Hour = getNext4Hour;
-exports.getNextHour = getNextHour;
-function getNextMinute(date) {
-    return new Date(date.getTime() + 60 * 1000);
-}
-exports.getNextMinute = getNextMinute;
+Configure parameters in `config.json` to adjust pool settings, rebalance intervals, and interest rates.
+
+## Data Gathering
+
+1. Add your `RPC_URL` inside `tuner.config.js`.
+
+2. Go inside 'scripts/events_downloader.ts` and set the pool name and its address.
+
+```bash
+yarn run download
 ```
 
-util/DateUtils.d.ts
+Wait for it to finish.
 
-```javascript
-export declare function getNextHour(date: Date): Date;
-export declare function getNext4Hour(date: Date): Date;
-export declare function getNextMinute(date: Date): Date;
+3. If it drops, or you simply want it to be up-to-date run, make sure to do step 2 for `scripts/events_updater.ts`:
+
+```bash
+yarn run update
 ```
+
+At the end, move the database file from the source to the `data` folder.
+
+# Future features
+Not in any particular order
+
+- Borrow Interest
+- Show on the plotting when DLV and ALM rebalances happen
+- Show volume fees captured
+- IL realized between ALM rebalances

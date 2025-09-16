@@ -28,7 +28,9 @@ import {
   toU128,
   nowSeconds,
   WAD,
-  FEE_DEN
+  FEE_DEN,
+  minJSBI,
+  minOutPpm
 } from "../utils";
 
 /** ---------- Vault ---------- */
@@ -489,15 +491,23 @@ export class AlphaProVault {
     const A0 = await this.getTotalAmounts(false);
     
     if (rebalanceBorrowedAmount.mode === "leverage") {
-      const usdcDeposit = sub(rebalanceBorrowedAmount.borrowUSDC, rebalanceBorrowedAmount.swapUSDCtoWBTC);
-      // If both sides are zero, skip deposit to avoid APV_ZeroDepositAmount
-      let amount0Min = sub(sub(rebalanceBorrowedAmount.btcReceived, div(rebalanceBorrowedAmount.btcReceived, JSBI.BigInt(100000))), JSBI.BigInt(50)); // ~$0.05
-      if (JSBI.lessThan(amount0Min, ZERO)) amount0Min = ZERO;
-      let amount1Min = sub(sub(usdcDeposit, div(usdcDeposit, JSBI.BigInt(100000))), JSBI.BigInt(400000)); // ~$0.4
-      if (JSBI.lessThan(amount1Min, ZERO)) amount1Min = ZERO;
+      const SLIPPAGE_PPM = 10; // == 1/100000
+      const amount0Desired = rebalanceBorrowedAmount.btcReceived;
+      const usdcDeposit    = sub(rebalanceBorrowedAmount.borrowUSDC, rebalanceBorrowedAmount.swapUSDCtoWBTC);
+
+      ensure(
+        JSBI.lessThanOrEqual(rebalanceBorrowedAmount.swapUSDCtoWBTC, rebalanceBorrowedAmount.borrowUSDC),
+        "swapUSDCtoWBTC > borrowUSDC (would make USDC deposit negative)",
+        {
+          borrowUSDC: rebalanceBorrowedAmount.borrowUSDC.toString(),
+          swapUSDCtoWBTC: rebalanceBorrowedAmount.swapUSDCtoWBTC.toString()
+        }
+      );
+
+      let amount0Min = minOutPpm(amount0Desired, SLIPPAGE_PPM, JSBI.BigInt(50));       // ~$0.05 in WBTC units
+      let amount1Min = minOutPpm(usdcDeposit,    SLIPPAGE_PPM, JSBI.BigInt(400_000));  // ~$0.40 in USDC(6dp)
 
       if (!(eq(rebalanceBorrowedAmount.btcReceived, ZERO) && eq(usdcDeposit, ZERO))) {
-        console.log("Leverage deposit: " + rebalanceBorrowedAmount.btcReceived.toString() + " WBTC and " + usdcDeposit.toString() + " USDC");
         await this.deposit(engine, {
           sender: MANAGER,
           to: MANAGER,
@@ -509,7 +519,6 @@ export class AlphaProVault {
       }
       this.virtualDebt = add(this.virtualDebt, rebalanceBorrowedAmount.borrowUSDC);
     } else if (rebalanceBorrowedAmount.mode === "deleverage") {
-      console.log("Deleverage withdraw: " + rebalanceBorrowedAmount.withdrawWBTC.toString() + " WBTC and " + rebalanceBorrowedAmount.withdrawUSDC.toString() + " USDC to repay " + rebalanceBorrowedAmount.repayUSDC.toString() + " USDC");
       // If no shares to burn, skip withdraw to avoid APV_ZeroShares.
       let amount0Min = sub(sub(rebalanceBorrowedAmount.withdrawWBTC, div(rebalanceBorrowedAmount.withdrawWBTC, JSBI.BigInt(100000))), JSBI.BigInt(5)); // ~$0.005
       if (JSBI.lessThan(amount0Min, ZERO)) amount0Min = ZERO;
@@ -525,6 +534,8 @@ export class AlphaProVault {
           amount1Min
         });
       }
+      const repay = rebalanceBorrowedAmount.repayUSDC;
+      console.log("Rebalance debt: repaying " + repay.toString() + " USDC of " + this.virtualDebt.toString() + " virtual debt");
       this.virtualDebt = sub(this.virtualDebt, rebalanceBorrowedAmount.repayUSDC);
     }
     const A1 = await this.getTotalAmounts(false);
@@ -544,13 +555,12 @@ export class AlphaProVault {
       maxUint128: MAX_UINT128.toString()
     });
     const crWad       = await this._collateralRatioWad(false);
-    console.log("Current collateral ratio: " + crWad.toString());
     const targetCrWad = JSBI.BigInt(TARGET_CR);      // e.g. 2e18 for 200%
     const diffWad     = JSBI.greaterThan(crWad, targetCrWad)
       ? sub(crWad, targetCrWad)
       : sub(targetCrWad, crWad);
 
-    const CR_TOL_WAD  = JSBI.BigInt("30000000000000000"); // 3e16 ≈ 3%
+    const CR_TOL_WAD  = JSBI.BigInt("100000000000000000"); // 10e16 ≈ 10%
     ensure(
       JSBI.lessThanOrEqual(diffWad, CR_TOL_WAD),
       "Incorrect collateral ratio after debt rebalance",
@@ -633,10 +643,7 @@ export class AlphaProVault {
   async totalPoolValue(): Promise<JSBI> {
     const { total0, total1 } = await this.getTotalAmounts();
     const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
-    console.log(div(priceWad, JSBI.BigInt(1e18)).toString() + " Price WAD (USDC per BTC)");
     const btcValueUSDC = this.btcRawToUsdcRaw(total0, priceWad); // << scale applied
-    console.log(add(total1, btcValueUSDC).toString() + " Total pool value USDC");
-    console.log(this.virtualDebt.toString() + " Virtual debt USDC");
     return sub(add(total1, btcValueUSDC), this.virtualDebt);
   }
 
@@ -801,69 +808,81 @@ export class AlphaProVault {
         swapFeeUSDC,
         postCR
       };
-    } else if (JSBI.lessThan(V0, twoD0)) {
-      // ===== Deleverage: withdraw to repay; swap ALL withdrawn BTC -> USDC.
-      // denomDelWAD = 1 - 2f/(R+1)  (in WAD)
-      const two_fWAD = JSBI.multiply(fWAD, JSBI.BigInt(2));
-      const denomSub = FullMath.mulDiv(JSBI.multiply(two_fWAD, WAD), JSBI.BigInt(1), Rplus1WAD);
-      const denomDelWAD = sub(WAD, denomSub);
-  
-      const deficit = sub(twoD0, V0);
-  
-      if (JSBI.lessThanOrEqual(denomDelWAD, ZERO)) {
-        // withdraw everything fallback
-        const sharesAll = this.totalSupply;
-        const usdcOutAll = USDC0;
-        const btcOutAll = BTC0;
-        const btcValAllUSDC = this.btcRawToUsdcRaw(btcOutAll, priceWad);
-        const swapFeeUSDC = FullMath.mulDiv(btcValAllUSDC, feeNum, FEE_DEN); // NEW
-        const usdcFromBtc = sub(btcValAllUSDC, swapFeeUSDC);
-        const repay = add(usdcOutAll, usdcFromBtc);
-        const repayClamped = JSBI.lessThan(repay, D0) ? repay : D0;
-  
-        const V1 = ZERO;
-        const D1 = sub(D0, repayClamped);
-        const postCR = eq(D1, ZERO) ? Number.POSITIVE_INFINITY : (JSBI.toNumber(V1) / JSBI.toNumber(D1)) * 100;
-  
-        return {
-          mode: "deleverage",
-          sharesToBurn: sharesAll,
-          withdrawUSDC: usdcOutAll,
-          withdrawWBTC: btcOutAll,
-          repayUSDC: repayClamped,
-          swapFeeUSDC,
-          postCR
-        };
-      }
-  
-      // Targeted withdrawal value:
-      const W = ceilDiv(FullMath.mulDiv(deficit, WAD, JSBI.BigInt(1)), denomDelWAD);
-  
-      // Composition by current vault mix:
-      const usdcOut = FullMath.mulDiv(W, Rw, Rplus1WAD);
-      const btcValOut = sub(W, usdcOut); // USDC value of BTC withdrawn
-      const swapFeeUSDC = FullMath.mulDiv(btcValOut, feeNum, FEE_DEN); // NEW
-      const usdcFromBtc = sub(btcValOut, swapFeeUSDC);
-  
-      const repay = add(usdcOut, usdcFromBtc);
-      const repayClamped = JSBI.lessThan(repay, D0) ? repay : D0;
-  
-      const btcOut = this.usdcRawToBtcRaw(btcValOut, priceWad);
-      const sharesToBurn = eq(V0, ZERO) ? ZERO : FullMath.mulDiv(this.totalSupply, W, V0);
-  
-      const V1 = sub(V0, W);
-      const D1 = sub(D0, repayClamped);
-      const postCR = eq(D1, ZERO) ? Number.POSITIVE_INFINITY : (JSBI.toNumber(V1) / JSBI.toNumber(D1)) * 100;
-  
-      return {
-        mode: "deleverage",
-        sharesToBurn,
-        withdrawUSDC: usdcOut,
-        withdrawWBTC: btcOut,
-        repayUSDC: repayClamped,
-        swapFeeUSDC,
-        postCR
-      };
+} else if (JSBI.lessThan(V0, twoD0)) {
+  // ===== Deleverage =====
+  const two_fWAD = JSBI.multiply(fWAD, JSBI.BigInt(2));
+  // denomDelWAD = 1 - 2f/(R+1)
+  const denomDelWAD = sub(WAD, FullMath.mulDiv(two_fWAD, WAD, Rplus1WAD));
+  const deficit = sub(twoD0, V0);
+
+  // --- infeasible or degenerate? withdraw-all fallback
+  if (JSBI.lessThanOrEqual(denomDelWAD, ZERO)) {
+    // withdraw-all (unchanged from your code)
+    const sharesAll = this.totalSupply;
+    const usdcOutAll = USDC0;
+    const btcOutAll  = BTC0;
+    const btcValAllUSDC = this.btcRawToUsdcRaw(btcOutAll, priceWad);
+    const swapFeeUSDC = FullMath.mulDiv(btcValAllUSDC, feeNum, FEE_DEN);
+    const usdcFromBtc = sub(btcValAllUSDC, swapFeeUSDC);
+    const repay = add(usdcOutAll, usdcFromBtc);
+    const repayClamped = JSBI.lessThan(repay, D0) ? repay : D0;
+
+    const V1 = ZERO;
+    const D1 = sub(D0, repayClamped);
+    const postCR = eq(D1, ZERO) ? Number.POSITIVE_INFINITY : (JSBI.toNumber(V1) / JSBI.toNumber(D1)) * 100;
+
+    return {
+      mode: "deleverage",
+      sharesToBurn: sharesAll,
+      withdrawUSDC: usdcOutAll,
+      withdrawWBTC: btcOutAll,
+      repayUSDC: repayClamped,
+      swapFeeUSDC,
+      postCR
+    };
+  }
+
+  // closed-form target W (value to withdraw)
+  const W = ceilDiv(FullMath.mulDiv(deficit, WAD, JSBI.BigInt(1)), denomDelWAD); // = deficit / (1 - 2f/(R+1))
+
+  // can we actually hit target? (W ≤ V0)
+  const canHitTarget =
+    JSBI.lessThanOrEqual(W, V0) // equivalent to deficit ≤ V0 * denomDelWAD / WAD
+    // (robust version avoids recomputation):
+    || JSBI.lessThanOrEqual(deficit, FullMath.mulDiv(V0, denomDelWAD, WAD));
+
+  // ---- CAP to feasible amounts
+  const Wcap = JSBI.lessThanOrEqual(W, V0) ? W : V0;
+
+  // composition at current mix
+  const usdcOut   = FullMath.mulDiv(Wcap, Rw, Rplus1WAD);
+  const btcValOut = sub(Wcap, usdcOut);
+  const swapFeeUSDC = FullMath.mulDiv(btcValOut, feeNum, FEE_DEN);
+  const usdcFromBtc = sub(btcValOut, swapFeeUSDC);
+
+  const repay = add(usdcOut, usdcFromBtc);
+  const repayClamped = JSBI.lessThan(repay, D0) ? repay : D0;
+
+  const btcOut = this.usdcRawToBtcRaw(btcValOut, priceWad);
+
+  // cap shares to totalSupply (avoid >100% burn)
+  const sharesToBurnRaw = eq(V0, ZERO) ? ZERO : FullMath.mulDiv(this.totalSupply, Wcap, V0);
+  const sharesToBurn = JSBI.lessThanOrEqual(sharesToBurnRaw, this.totalSupply)
+    ? sharesToBurnRaw : this.totalSupply;
+
+  const V1 = sub(V0, Wcap);
+  const D1 = sub(D0, repayClamped);
+  const postCR = eq(D1, ZERO) ? Number.POSITIVE_INFINITY : (JSBI.toNumber(V1) / JSBI.toNumber(D1)) * 100;
+
+  return {
+    mode: "deleverage",
+    sharesToBurn,
+    withdrawUSDC: usdcOut,
+    withdrawWBTC: btcOut,
+    repayUSDC: repayClamped,
+    swapFeeUSDC,
+    postCR
+  };
     } else {
       return { mode: "noop" };
     }

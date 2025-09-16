@@ -37,7 +37,7 @@ export interface RebalanceLog {
 
 describe("DLV Strategy", function () {
   const eventDBManagerPath =
-    "data/WBTC-USDC_0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35.db";
+    "WBTC-USDC_0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35.db";
   const rebalanceLogDBManagerPath = "rebalance_log_usdc_wbtc_3000.db";
   let logDB: LogDBManager;
 
@@ -75,8 +75,8 @@ describe("DLV Strategy", function () {
     // 572.14 USDC with 6 decimals => 572.14 * 10^6 = 572_140_000
     // let initialUSDCAmount: JSBI = toJSBI(mul10pow(BN.from(57214), 4)); // 6 decimals
 
-    let startDate = getDate(2021, 5, 6); // really is day 5
-    let endDate = getDate(2024, 12, 18);
+    let startDate = getDate(2021, 5, 6);
+    let endDate = getDate(2024, 12, 15);
 
     let trigger = async function (
       phase: Phase,
@@ -135,7 +135,6 @@ describe("DLV Strategy", function () {
           const prevTotalPoolValue = await vault.totalPoolValue();
           const prevCollateralRatioNum = await vault.collateralRatio();
 
-          // scale ratio by 1e6 to store as integer in BigNumber (avoid decimals)
           const RATIO_SCALE = 1e6;
           const prevCollateralRatio = Number.isFinite(prevCollateralRatioNum)
             ? safeToBN(Math.round(prevCollateralRatioNum * RATIO_SCALE))
@@ -157,7 +156,6 @@ describe("DLV Strategy", function () {
             : safeToBN(0);
 
           const date = variable.get(CommonVariables.DATE) as Date;
-          console.log(currPrice.toString() + " CurrPrice (USDC per BTC)");
           const newLog: RebalanceLog = {
             wide0: positions[0][0],
             wide1: positions[0][1],
@@ -167,7 +165,7 @@ describe("DLV Strategy", function () {
             limit1: positions[2][1],
             total0: safeToBN(totalAmounts.total0),
             total1: safeToBN(totalAmounts.total1),
-            nonVolatileAssetPrice: safeToBN(currPrice), // scale by 100 to avoid decimals
+            nonVolatileAssetPrice: safeToBN(currPrice),
             prevTotalPoolValue: safeToBN(prevTotalPoolValue),
             afterTotalPoolValue: safeToBN(await vault.totalPoolValue()),
             lpRatio: safeToBN(await vault.lpRatio(true)),
@@ -176,7 +174,6 @@ describe("DLV Strategy", function () {
             afterCollateralRatio,
             date
           };
-          console.log("Rebalance log:", newLog);
 
           await logDB.persistRebalanceLog(newLog);
           break;
@@ -232,9 +229,6 @@ describe("DLV Strategy", function () {
   });
 });
 
-function sqrtPriceToView(sqrtPriceX96: BN): BN {
-  return get10pow(12).div(sqrtPriceX96.pow(2).shr(96 * 2));
-}
 
 async function isWithinCrDeviationThreshold(vault: AlphaProVault): Promise<boolean> {
   const crPercent = await vault.collateralRatio(); // returns percent, e.g. ~200
