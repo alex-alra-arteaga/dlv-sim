@@ -1,6 +1,5 @@
 import { VaultParams } from "./src/charm/types";
 import { LookUpPeriod } from "./src/enums";
-import { dateUtc } from "./src/utils";
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
 
@@ -23,8 +22,5 @@ export const dlvConfig = {
   deviationThreshold: undefined, // 0. 1 -> 10%
   debtToVolatileSwapFee: 0.0015, // 0.15%
 };
-
-export const startDate = dateUtc(2021, 5, 4);
-export const endDate = dateUtc(2024, 12, 18); // TODO
 
 export const BORROW_RATE = undefined; // TODO

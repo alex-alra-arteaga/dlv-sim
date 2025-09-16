@@ -32,7 +32,7 @@ yarn simulate
 
 ## Configuration
 
-Configure parameters in `config.json` to adjust pool settings, rebalance intervals, and interest rates.
+Configure parameters in `config.json` to adjust Charm, DLV and simulation look-up period settings.
 
 ## Data Gathering
 

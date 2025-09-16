@@ -126,10 +126,6 @@ export async function buildStrategy(
       }
     }
 
-    // TODO handle account balance during backtest independently
-    // let usdcBalance = account.USDC;
-    // let wbtcBalance = account.WBTC;
-
     // 1. Instantiate a SimulationDataManager
     // this is for handling the internal data (snapshots, roadmaps, etc.)
     let simulationDataManager: SimulationDataManager = await SQLiteSimulationDataManager.buildInstance();
