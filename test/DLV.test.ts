@@ -37,7 +37,7 @@ export interface RebalanceLog {
 
 describe("DLV Strategy", function () {
   const eventDBManagerPath =
-    "WBTC-USDC_0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35.db";
+    "data/WBTC-USDC_0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35.db";
   const rebalanceLogDBManagerPath = "rebalance_log_usdc_wbtc_3000.db";
   let logDB: LogDBManager;
 
