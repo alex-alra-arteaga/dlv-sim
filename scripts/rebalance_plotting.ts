@@ -106,8 +106,8 @@ function parseRow(r: RawRow): ParsedRow {
     vaultValue:  toNum(r.afterTotalPoolValue)   / 1e6,  // Scale by another 10x (1e6 instead of 1e7)
     feeUSDC:     toNum(r.swapFeeUSDC) / 1e6,
     lpRatio:     toNum(r.lpRatio) / 1e18,
-    prevCR:      toNum(r.prevCollateralRatio)  / 1e8,
-    afterCR:     toNum(r.afterCollateralRatio) / 1e8,
+    prevCR:      toNum(r.prevCollateralRatio)  / 100,  // Changed from 1e8 to 100
+    afterCR:     toNum(r.afterCollateralRatio) / 100,  // Changed from 1e8 to 100
   };
 }
 
@@ -303,8 +303,8 @@ function sharesLayout(data){
 
 function crSeries(data){
   const x = xDates(data);
-  // afterCR is a ratio (e.g., 2.0 == 200%); convert to %
-  const crPct = data.map(d => (d.afterCR ?? 0) * 100);
+  // afterCR is already in percentage format after parsing (divided by 100)
+  const crPct = data.map(d => (d.afterCR ?? 0));
   return [
     { ...hoverLines, name:'Collateral Ratio', x, y: crPct, line:{color:'var(--blue)'} }
   ];
@@ -312,7 +312,7 @@ function crSeries(data){
 
 function crLayout(data){
   const center = 200;
-  const vals = data.map(d => (d.afterCR ?? 0) * 100).filter(Number.isFinite);
+  const vals = data.map(d => (d.afterCR ?? 0)).filter(Number.isFinite);
   let min = Math.min(...(vals.length ? vals : [center-50]));
   let max = Math.max(...(vals.length ? vals : [center+50]));
   const dev = Math.max(Math.abs(min-center), Math.abs(max-center), 5);  // keep at least ±5%
@@ -379,7 +379,7 @@ function portfolioValueSeries(data){
 
 function crChangeSeries(data){
   const x = xDates(data);
-  const crChange = data.map(d => ((d.afterCR ?? 0) - (d.prevCR ?? 0)) * 100); // Change in CR percentage points
+  const crChange = data.map(d => ((d.afterCR ?? 0) - (d.prevCR ?? 0))); // Change in CR percentage points (already in %)
   const colors = crChange.map(v => v >= 0 ? 'rgba(34,197,94,0.7)' : 'rgba(239,68,68,0.7)'); // green/red
 
   return [

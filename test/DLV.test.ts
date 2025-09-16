@@ -135,10 +135,15 @@ describe("DLV Strategy", function () {
           const prevTotalPoolValue = await vault.totalPoolValue();
           const prevCollateralRatioNum = await vault.collateralRatio();
 
-          const RATIO_SCALE = 1e6;
+          console.log(`Raw CR value: ${prevCollateralRatioNum}%`);
+
+          // Store the raw percentage value directly (no scaling)
           const prevCollateralRatio = Number.isFinite(prevCollateralRatioNum)
-            ? safeToBN(Math.round(prevCollateralRatioNum * RATIO_SCALE))
+            ? safeToBN(Math.round(prevCollateralRatioNum * 100)) // Scale by 100 for precision (200% -> 20000)
             : safeToBN(0);
+
+          console.log(`Scaled CR value for DB: ${prevCollateralRatio.toString()}`);
+          console.log(`Expected plotting result: ${prevCollateralRatio.toNumber() / 100}%`);
 
           if (rebalance === Rebalance.ALM) {
             await vault.rebalance(engine);
@@ -152,7 +157,7 @@ describe("DLV Strategy", function () {
           const totalAmounts = await vault.getTotalAmounts();
           const afterCollateralRatioNum = await vault.collateralRatio();
           const afterCollateralRatio = Number.isFinite(afterCollateralRatioNum)
-            ? safeToBN(Math.round(afterCollateralRatioNum * RATIO_SCALE))
+            ? safeToBN(Math.round(afterCollateralRatioNum * 100)) // Scale by 100 for precision
             : safeToBN(0);
 
           const date = variable.get(CommonVariables.DATE) as Date;
