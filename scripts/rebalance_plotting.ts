@@ -49,6 +49,11 @@ type RawRow = {
   swapFeeUSDC: string;           // assumed native USDC units (override if needed)
   prevCollateralRatio: string;   // 8
   afterCollateralRatio: string;  // 8
+  accumulatedSwapFees0: string;  // accumulated WBTC swap fees collected
+  accumulatedSwapFees1: string;  // accumulated USDC swap fees collected
+  btcHoldValueUSDC: string;      // value if we held BTC from start
+  realizedIL: string;            // realized impermanent loss
+  swapFeesGainedThisPeriod: string; // swap fees gained during this period
   date: string;
 };
 
@@ -66,6 +71,14 @@ type ParsedRow = {
   feeUSDC: number;            // swap fees (USDC)
   lpRatio: number;            // normalized (1 == balanced)
   prevCR: number; afterCR: number; // 0..?
+  accumulatedSwapFees0Raw: number; // accumulated WBTC swap fees (raw units)
+  accumulatedSwapFees1Raw: number; // accumulated USDC swap fees (raw units)
+  accumulatedSwapFeesUsd: number;  // accumulated swap fees in USD value
+  accumulatedSwapFeesPercent: number; // accumulated swap fees as % of position
+  // IL tracking
+  btcHoldValueUSDC: number;    // value if we held BTC from start
+  realizedIL: number;          // realized impermanent loss in USDC
+  swapFeesGainedThisPeriod: number; // swap fees gained during this period
 };
 
 function toNum(s: string): number {
@@ -108,7 +121,35 @@ function parseRow(r: RawRow): ParsedRow {
     lpRatio:     toNum(r.lpRatio) / 1e18,
     prevCR:      toNum(r.prevCollateralRatio)  / 100,  // Changed from 1e8 to 100
     afterCR:     toNum(r.afterCollateralRatio) / 100,  // Changed from 1e8 to 100
+    
+    // accumulated swap fees
+    accumulatedSwapFees0Raw: toNum(r.accumulatedSwapFees0 || "0") / 10 ** CONFIG.asset0Decimals,
+    accumulatedSwapFees1Raw: toNum(r.accumulatedSwapFees1 || "0") / 10 ** CONFIG.asset1Decimals,
+    
+    // IL tracking fields
+    btcHoldValueUSDC: toNum(r.btcHoldValueUSDC || "0") / 1e6,
+    realizedIL: toNum(r.realizedIL || "0") / 100, // convert from basis points to percentage (10000 basis points = 100%)
+    swapFeesGainedThisPeriod: toNum(r.swapFeesGainedThisPeriod || "0") / 1e6,
+    
+    // computed fields (will be calculated below)
+    accumulatedSwapFeesUsd: 0,
+    accumulatedSwapFeesPercent: 0,
   };
+}
+
+function postProcessSwapFees(row: ParsedRow): ParsedRow {
+  // Calculate USD value of accumulated swap fees using current price
+  const btcFeesUsd = row.accumulatedSwapFees0Raw * row.price;
+  row.accumulatedSwapFeesUsd = row.accumulatedSwapFees1Raw + btcFeesUsd;
+  
+  // Calculate percentage of position value
+  if (row.vaultValue > 0) {
+    row.accumulatedSwapFeesPercent = (row.accumulatedSwapFeesUsd / row.vaultValue) * 100;
+  } else {
+    row.accumulatedSwapFeesPercent = 0;
+  }
+  
+  return row;
 }
 
 // batching utilities
@@ -147,7 +188,16 @@ function aggregate(rows: Series, g: Grain): Series {
       price: sum(x => x.price) / n,  vaultValue: sum(x => x.vaultValue) / n,
       feeUSDC: sum(x => x.feeUSDC),  // sum fees within bucket
       lpRatio: sum(x => x.lpRatio) / n,
-      prevCR:  sum(x => x.prevCR) / n, afterCR: sum(x => x.afterCR) / n
+      prevCR:  sum(x => x.prevCR) / n, afterCR: sum(x => x.afterCR) / n,
+      // For accumulated swap fees, take the last value in the bucket
+      accumulatedSwapFees0Raw: arr[arr.length - 1].accumulatedSwapFees0Raw,
+      accumulatedSwapFees1Raw: arr[arr.length - 1].accumulatedSwapFees1Raw,
+      accumulatedSwapFeesUsd: arr[arr.length - 1].accumulatedSwapFeesUsd,
+      accumulatedSwapFeesPercent: arr[arr.length - 1].accumulatedSwapFeesPercent,
+      // IL tracking - take last values for accumulated metrics
+      btcHoldValueUSDC: arr[arr.length - 1].btcHoldValueUSDC,
+      realizedIL: arr[arr.length - 1].realizedIL,
+      swapFeesGainedThisPeriod: sum(x => x.swapFeesGainedThisPeriod), // sum over period
     });
   }
   out.sort((a, b) => a.t - b.t);
@@ -199,7 +249,9 @@ function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: 
     <div class="card"><h2>Position Ranges (wide/base/limit)</h2><div id="ranges"></div></div>
     <div class="card"><h2>${payload.a0} vs ${payload.a1} Share</h2><div id="shares"></div></div>
     <div class="card"><h2>Collateral Ratio (target 200%)</h2><div id="cr"></div></div>
-    <div class="card"><h2>Accumulated Swap Fees</h2><div id="fees"></div></div>
+    <div class="card"><h2>Accumulated Swap Fee Cost</h2><div id="fees"></div></div>
+    <div class="card"><h2>Swap fees collected</h2><div id="swapFeesCollected"></div></div>
+    <div class="card"><h2>Impermanent Loss vs BTC Hold Strategy</h2><div id="realizedIL"></div></div>
     <div class="card"><h2>Position Range Widths</h2><div id="widths"></div></div>
     <div class="card"><h2>Portfolio Value Breakdown</h2><div id="portfolio"></div></div>
     <div class="card"><h2>Collateral Ratio Changes</h2><div id="crchange"></div></div>
@@ -341,6 +393,36 @@ function feesSeries(data){
   ];
 }
 
+function swapFeesCollectedSeries(data){
+  const x = xDates(data);
+  const feesUsd = data.map(d => d.accumulatedSwapFeesUsd);
+  const feesPercent = data.map(d => d.accumulatedSwapFeesPercent);
+
+  return [
+    { ...hoverLines, name:'Accumulated swap fees collected (USD)', x, y:feesUsd, line:{color:'var(--blue)'} },
+    { ...hoverLines, name:'Fees as % of position', x, y:feesPercent, yaxis:'y2', line:{color:'var(--pink)'},
+      hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>%{y:.2f}%<extra></extra>' }
+  ];
+}
+
+function realizedILSeries(data){
+  const x = xDates(data);
+  
+  // IL is already stored as percentage (converted from basis points)
+  // Positive = vault underperformed (traditional IL)
+  // Negative = vault outperformed (impermanent gain)
+  const realizedILPercent = data.map(d => d.realizedIL);
+  
+  const btcHoldValue = data.map(d => d.btcHoldValueUSDC);
+  const vaultValue = data.map(d => d.vaultValue);
+
+  return [
+    { ...hoverLines, name:'Impermanent Loss (%)', x, y:realizedILPercent, line:{color:'#ef4444', width:3} },
+    { ...hoverLines, name:'BTC Hold Value (USDC)', x, y:btcHoldValue, yaxis:'y2', line:{color:'#f97316'}, visible:'legendonly' },
+    { ...hoverLines, name:'Vault Value (USDC)', x, y:vaultValue, yaxis:'y2', line:{color:'#22c55e'}, visible:'legendonly' }
+  ];
+}
+
 function rangeWidthSeries(data){
   const x = xDates(data);
   const wideWidth = data.map(d => d.wide1 - d.wide0);
@@ -410,7 +492,9 @@ function render(grain='raw'){
   Plotly.react('ranges', rangesSeries(data),        layout('Position price ranges', 'Price (USDC)'));
   Plotly.react('shares', sharesSeries(data),        layout('${payload.a0} vs ${payload.a1} share', '% of portfolio'));
   Plotly.react('cr',     crSeries(data),            crLayout(data));
-  Plotly.react('fees',   feesSeries(data),          layout('Accumulated swap fees paid on DLV rebalances', 'USDC', '% of position'));
+  Plotly.react('fees',   feesSeries(data),          layout('Accumulated swap fee cost paid on DLV rebalances', 'USDC', '% of position'));
+  Plotly.react('swapFeesCollected', swapFeesCollectedSeries(data), layout('Swap fees collected', 'USD', '% of position'));
+  Plotly.react('realizedIL', realizedILSeries(data), layout('Impermanent Loss vs BTC Hold Strategy', 'IL %', 'USDC'));
   Plotly.react('portfolio', portfolioValueSeries(data), layout('Portfolio value breakdown', 'Value (USDC)'));
   Plotly.react('crchange', crChangeSeries(data),    layout('Collateral ratio change per rebalance', 'Change (percentage points)'));
   Plotly.react('widths', rangeWidthSeries(data),    layout('Position range widths (could be dynamically changed)', 'Price width (USDC)'));
@@ -451,6 +535,7 @@ async function main() {
 
     // parse + scale
     const parsedAll = rows.map(parseRow)
+      .map(postProcessSwapFees)
       .filter(r => r.t <= CONFIG.endDateUtc)
       .sort((a,b)=>a.t-b.t);
 

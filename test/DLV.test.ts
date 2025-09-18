@@ -32,6 +32,12 @@ export interface RebalanceLog {
   swapFeeUSDC: BN;
   prevCollateralRatio: BN;
   afterCollateralRatio: BN;
+  accumulatedSwapFees0: BN;
+  accumulatedSwapFees1: BN;
+  // IL tracking fields
+  btcHoldValueUSDC: BN; // Value of individual holdings at next period's price
+  realizedIL: BN; // IL as percentage (scaled by 10000 for precision)
+  swapFeesGainedThisPeriod: BN; // Swap fees gained between periods
   date: Date;
 }
 
@@ -44,6 +50,7 @@ describe("DLV Strategy", function () {
   beforeEach(async function () {
     logDB = new LogDBManager(rebalanceLogDBManagerPath);
     await logDB.initTables();
+    await logDB.clearRebalanceLog(); // Clear previous run data
   });
 
   afterEach(async function () {
@@ -54,6 +61,12 @@ describe("DLV Strategy", function () {
     const TICK_COUNT = "tickCount";
     const DLV_CALLS  = "dlvCalls";
     const ALM_CALLS  = "almCalls";
+    
+    // IL tracking variables - track values between consecutive periods
+    let previousAfterTotalPoolValue: JSBI | null = null; // <-- GAV at end of previous interval
+    let previousTotalAmounts: { total0: JSBI; total1: JSBI } | null = null;
+    let previousAccumulatedSwapFees: { fees0: JSBI; fees1: JSBI } | null = null;
+    
     // set priceWindow for strategy
     if (charmConfig.period % configLookUpPeriod !== 0) {
       throw new Error(
@@ -120,73 +133,185 @@ describe("DLV Strategy", function () {
       }
     };
 
-    let act = async function (
-      phase: Phase,
-      rebalance: Rebalance,
-      engine: Engine,
-      _corePoolView: CorePoolView,
-      vault: AlphaProVault,
-      variable: Map<string, any>
-    ): Promise<void> {
-      switch (phase) {
-        case Phase.AFTER_NEW_TIME_PERIOD: {
-          const currPrice = vault.poolPrice(vault.pool.sqrtPriceX96);
-          let swapFeeUSDC = JSBI.BigInt(0);
-          const prevTotalPoolValue = await vault.totalPoolValue();
-          const prevCollateralRatioNum = await vault.collateralRatio();
 
-          console.log(`Raw CR value: ${prevCollateralRatioNum}%`);
+// --- helpers (unchanged) ---
+const BPS_SCALE = JSBI.BigInt(10_000);
+const ZERO = JSBI.BigInt(0);
+const isPos = (x: JSBI) => JSBI.greaterThan(x, ZERO);
+// round-half-up
+function divRound(n: JSBI, d: JSBI): JSBI {
+  if (!isPos(d)) return ZERO;
+  const half = JSBI.divide(d, JSBI.BigInt(2));
+  return JSBI.divide(JSBI.add(n, half), d);
+}
 
-          // Store the raw percentage value directly (no scaling)
-          const prevCollateralRatio = Number.isFinite(prevCollateralRatioNum)
-            ? safeToBN(Math.round(prevCollateralRatioNum * 100)) // Scale by 100 for precision (200% -> 20000)
-            : safeToBN(0);
+const act = async function (
+  phase: Phase,
+  rebalance: Rebalance,
+  engine: Engine,
+  _corePoolView: CorePoolView,
+  vault: AlphaProVault,
+  variable: Map<string, any>
+): Promise<void> {
+  switch (phase) {
+    case Phase.AFTER_NEW_TIME_PERIOD: {
+      const currPrice = vault.poolPrice(vault.pool.sqrtPriceX96);
+      const startAmounts = await vault.getTotalAmounts(); // gross token balances now
+      const wbtcUSDC_now = vault.btcRawToUsdcRaw(startAmounts.total0, currPrice);
+      const gavStart = JSBI.add(startAmounts.total1, wbtcUSDC_now); // for logging only
 
-          console.log(`Scaled CR value for DB: ${prevCollateralRatio.toString()}`);
-          console.log(`Expected plotting result: ${prevCollateralRatio.toNumber() / 100}%`);
+      // NAV source of truth
+      const prevTotalPoolValue = await vault.totalPoolValue(); // NAV_t_start
+      const debtNow = vault.virtualDebt; // constant between rebalances
 
-          if (rebalance === Rebalance.ALM) {
-            await vault.rebalance(engine);
-            variable.set(ALM_CALLS, ((variable.get(ALM_CALLS) as number) ?? 0) + 1);
-          } else if (rebalance === Rebalance.DLV) {
-            swapFeeUSDC = await vault.rebalanceDebt(engine);
-            variable.set(DLV_CALLS, ((variable.get(DLV_CALLS) as number) ?? 0) + 1);
-          }
+      console.log("[START] price:", currPrice.toString());
+      console.log("[START] amounts.total0 (WBTC raw):", startAmounts.total0.toString());
+      console.log("[START] amounts.total1 (USDC raw):", startAmounts.total1.toString());
+      console.log("[START] GAV:", gavStart.toString());
+      console.log("[START] NAV (totalPoolValue):", prevTotalPoolValue.toString());
+      console.log("[START] virtualDebt:", debtNow.toString());
 
-          const positions = await vault.getPositions();
-          const totalAmounts = await vault.getTotalAmounts();
-          const afterCollateralRatioNum = await vault.collateralRatio();
-          const afterCollateralRatio = Number.isFinite(afterCollateralRatioNum)
-            ? safeToBN(Math.round(afterCollateralRatioNum * 100)) // Scale by 100 for precision
-            : safeToBN(0);
+      const prevCollateralRatioNum = await vault.collateralRatio();
+      const prevCollateralRatio = Number.isFinite(prevCollateralRatioNum)
+        ? safeToBN(Math.round(prevCollateralRatioNum * 100))
+        : safeToBN(0);
 
-          const date = variable.get(CommonVariables.DATE) as Date;
-          const newLog: RebalanceLog = {
-            wide0: positions[0][0],
-            wide1: positions[0][1],
-            base0: positions[1][0],
-            base1: positions[1][1],
-            limit0: positions[2][0],
-            limit1: positions[2][1],
-            total0: safeToBN(totalAmounts.total0),
-            total1: safeToBN(totalAmounts.total1),
-            nonVolatileAssetPrice: safeToBN(currPrice),
-            prevTotalPoolValue: safeToBN(prevTotalPoolValue),
-            afterTotalPoolValue: safeToBN(await vault.totalPoolValue()),
-            lpRatio: safeToBN(await vault.lpRatio(true)),
-            swapFeeUSDC: safeToBN(swapFeeUSDC),
-            prevCollateralRatio,
-            afterCollateralRatio,
-            date
-          };
+      const feesSnapStart = vault.getTotalSwapFeesRaw(); // Use total fees (collected + uncollected)
+      console.log("[START] feesSnapStart.fees0 (WBTC):", feesSnapStart.fees0.toString());
+      console.log("[START] feesSnapStart.fees1 (USDC):", feesSnapStart.fees1.toString());
 
-          await logDB.persistRebalanceLog(newLog);
-          break;
-        }
-        case Phase.AFTER_EVENT_APPLIED:
-          break;
+      // ---------- IL compute (t-1 → t), NAV-consistent ----------
+      let realizedIL_bps_inclFees = ZERO;
+      let realizedIL_bps_exFees = ZERO;
+      let feesDeltaUSDC = ZERO;
+      let hodlNowUSDC = ZERO;     // HODL GAV
+      let hodlNowNAV_USDC = ZERO; // HODL NAV
+
+      if (
+        previousAfterTotalPoolValue !== null &&
+        previousTotalAmounts !== null &&
+        previousAccumulatedSwapFees !== null
+      ) {
+        const denomNAV = previousAfterTotalPoolValue; // NAV_{t-1} (post-prev-rebalance)
+        console.log("[PREV] NAV_{t-1}:", denomNAV.toString());
+        console.log("[PREV] amounts.total0:", previousTotalAmounts.total0.toString());
+        console.log("[PREV] amounts.total1:", previousTotalAmounts.total1.toString());
+        console.log("[PREV] feesSnapEnd.fees0:", previousAccumulatedSwapFees.fees0.toString());
+        console.log("[PREV] feesSnapEnd.fees1:", previousAccumulatedSwapFees.fees1.toString());
+
+        // fees Δ during (t-1, t] at current price, BEFORE any collection at t
+        const dFees0 = JSBI.subtract(feesSnapStart.fees0, previousAccumulatedSwapFees.fees0);
+        const dFees1 = JSBI.subtract(feesSnapStart.fees1, previousAccumulatedSwapFees.fees1);
+        const dFees0_USDC = vault.btcRawToUsdcRaw(dFees0, currPrice);
+        feesDeltaUSDC = JSBI.add(dFees1, dFees0_USDC);
+
+        console.log("[ΔFEES] dFees0 (WBTC):", dFees0.toString());
+        console.log("[ΔFEES] dFees1 (USDC):", dFees1.toString());
+        console.log("[ΔFEES] dFees0_USDC:", dFees0_USDC.toString());
+        console.log("[ΔFEES] feesDeltaUSDC:", feesDeltaUSDC.toString());
+
+        // HODL baseline @ t (reprice prev amounts)
+        const wbtcPrevNow_USDC = vault.btcRawToUsdcRaw(previousTotalAmounts.total0, currPrice);
+        hodlNowUSDC = JSBI.add(wbtcPrevNow_USDC, previousTotalAmounts.total1);
+        hodlNowNAV_USDC = JSBI.greaterThan(hodlNowUSDC, debtNow)
+          ? JSBI.subtract(hodlNowUSDC, debtNow)
+          : ZERO; // clamp
+
+        console.log("[HODL] hodlNowUSDC (GAV):", hodlNowUSDC.toString());
+        console.log("[HODL] hodlNowNAV_USDC (NAV):", hodlNowNAV_USDC.toString());
+
+        // IL including fees: (NAV_lp_t − NAV_hodl_t) / NAV_{t-1}
+        const numIncl = JSBI.subtract(prevTotalPoolValue, hodlNowNAV_USDC);
+        realizedIL_bps_inclFees = isPos(denomNAV)
+          ? divRound(JSBI.multiply(numIncl, BPS_SCALE), denomNAV)
+          : ZERO;
+
+        // IL excluding fees: (NAV_lp_t − feesΔ − NAV_hodl_t) / NAV_{t-1}
+        const lpExFees = JSBI.subtract(prevTotalPoolValue, feesDeltaUSDC);
+        const numEx = JSBI.subtract(lpExFees, hodlNowNAV_USDC);
+        realizedIL_bps_exFees = isPos(denomNAV)
+          ? divRound(JSBI.multiply(numEx, BPS_SCALE), denomNAV)
+          : ZERO;
+
+        console.log("[IL] numIncl:", numIncl.toString());
+        console.log("[IL] numEx:", numEx.toString());
+        console.log("[IL] IL_bps_inclFees:", realizedIL_bps_inclFees.toString());
+        console.log("[IL] IL_bps_exFees:", realizedIL_bps_exFees.toString());
+      } else {
+        console.log("[INIT] No previous snapshots yet; IL not computed this tick.");
       }
-    };
+
+      // ---------- REBALANCE / OPS ----------
+      const willRebalance = rebalance === Rebalance.ALM || rebalance === Rebalance.DLV;
+      console.log("[REB] willRebalance:", willRebalance);
+
+      let swapFeeUSDC = JSBI.BigInt(0);
+      if (rebalance === Rebalance.ALM) {
+        await vault.rebalance(engine);
+        variable.set(ALM_CALLS, ((variable.get(ALM_CALLS) as number) ?? 0) + 1);
+      } else if (rebalance === Rebalance.DLV) {
+        swapFeeUSDC = await vault.rebalanceDebt(engine);
+        variable.set(DLV_CALLS, ((variable.get(DLV_CALLS) as number) ?? 0) + 1);
+      }
+
+      // ---------- END (after ops) ----------
+      const positions = await vault.getPositions();
+      const totalAmounts = await vault.getTotalAmounts();
+      const afterCollateralRatioNum = await vault.collateralRatio();
+      const afterCollateralRatio = Number.isFinite(afterCollateralRatioNum)
+        ? safeToBN(Math.round(afterCollateralRatioNum * 100))
+        : safeToBN(0);
+
+      const accumulatedSwapFeesRaw = vault.getAccumulatedSwapFeesRaw();
+      const currentTotalValueUSDC = await vault.totalPoolValue(); // NAV_t_end
+      const date = variable.get(CommonVariables.DATE) as Date;
+
+      console.log("[END] accumulatedSwapFeesRaw.fees0:", accumulatedSwapFeesRaw.fees0.toString());
+      console.log("[END] accumulatedSwapFeesRaw.fees1:", accumulatedSwapFeesRaw.fees1.toString());
+      console.log("[END] NAV_t_end:", currentTotalValueUSDC.toString());
+
+      // ---------- LOG (unchanged schema/fields) ----------
+      const newLog: RebalanceLog = {
+        wide0: positions[0][0],
+        wide1: positions[0][1],
+        base0: positions[1][0],
+        base1: positions[1][1],
+        limit0: positions[2][0],
+        limit1: positions[2][1],
+        total0: safeToBN(totalAmounts.total0),
+        total1: safeToBN(totalAmounts.total1),
+        nonVolatileAssetPrice: safeToBN(currPrice),
+        prevTotalPoolValue: safeToBN(prevTotalPoolValue),       // NAV_t_start
+        afterTotalPoolValue: safeToBN(currentTotalValueUSDC),   // NAV_t_end
+        lpRatio: safeToBN(await vault.lpRatio(true)),
+        swapFeeUSDC: safeToBN(swapFeeUSDC),
+        prevCollateralRatio,
+        afterCollateralRatio,
+        accumulatedSwapFees0: safeToBN(accumulatedSwapFeesRaw.fees0),
+        accumulatedSwapFees1: safeToBN(accumulatedSwapFeesRaw.fees1),
+        btcHoldValueUSDC: safeToBN(hodlNowUSDC),
+        // realizedIL = bps EX-FEES (NAV-based)
+        realizedIL: safeToBN(realizedIL_bps_exFees),
+        swapFeesGainedThisPeriod: safeToBN(feesDeltaUSDC),
+        date,
+      };
+
+      await logDB.persistRebalanceLog(newLog);
+
+      // ---------- UPDATE SNAPSHOTS FOR NEXT PERIOD ----------
+      previousAfterTotalPoolValue = currentTotalValueUSDC; // NAV end-of-period
+      previousTotalAmounts = totalAmounts;                 // amounts end-of-period
+      previousAccumulatedSwapFees = accumulatedSwapFeesRaw; // fees snapshot end-of-period
+
+      break;
+    }
+    case Phase.AFTER_EVENT_APPLIED:
+      break;
+  }
+};
+
+
+
 
     let evaluate = async function (
       corePoolView: CorePoolView,

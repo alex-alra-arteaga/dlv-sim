@@ -61,6 +61,10 @@ export class AlphaProVault {
   accruedManagerFees0: Big = ZERO;
   accruedManagerFees1: Big = ZERO;
 
+  /** accumulated swap fees from collected positions */
+  accumulatedSwapFees0: Big = ZERO; // WBTC swap fees collected
+  accumulatedSwapFees1: Big = ZERO; // USDC swap fees collected
+
   /** ranges */
   wideLower = 0;
   wideUpper = 0;
@@ -289,6 +293,10 @@ export class AlphaProVault {
       const v0 = sub(fs0, m0);
       const v1 = sub(fs1, m1);
 
+      // Track proportional accumulated swap fees being withdrawn
+      this.accumulatedSwapFees0 = add(this.accumulatedSwapFees0, v0);
+      this.accumulatedSwapFees1 = add(this.accumulatedSwapFees1, v1);
+
       out0 = add(out0, v0);
       out1 = add(out1, v1);
 
@@ -350,7 +358,11 @@ export class AlphaProVault {
   
       const netFee0 = sub(fee0Before, m0);
       const netFee1 = sub(fee1Before, m1);
-  
+
+      // Track accumulated swap fees (net fees after manager fee)
+      this.accumulatedSwapFees0 = add(this.accumulatedSwapFees0, netFee0);
+      this.accumulatedSwapFees1 = add(this.accumulatedSwapFees1, netFee1);
+
       // Move everything into idle balances (principal + net fees)
       this.idle0 = add(this.idle0, add(principal0, netFee0));
       this.idle1 = add(this.idle1, add(principal1, netFee1));
@@ -635,7 +647,7 @@ export class AlphaProVault {
   }
   
   // BTC raw (1e8) from USDC raw (1e6) using RAW ratio price (token1Raw per token0Raw)
-  private usdcRawToBtcRaw(usdcRaw: JSBI, priceWadRaw: JSBI): JSBI {
+  usdcRawToBtcRaw(usdcRaw: JSBI, priceWadRaw: JSBI): JSBI {
     // btcRaw = usdcRaw / priceRaw
     return FullMath.mulDiv(usdcRaw, WAD, priceWadRaw);
   }
@@ -996,6 +1008,68 @@ export class AlphaProVault {
     if (t < -maxT) return -maxT;
     if (t > maxT) return maxT;
     return t;
+  }
+
+  /** Get accumulated swap fees in USD value using current price */
+  async getAccumulatedSwapFeesUsdValue(): Promise<JSBI> {
+    const priceWad = this.poolPrice(this.pool.sqrtPriceX96); // USDC per WBTC in WAD
+    const btcFeesValueUSDC = this.btcRawToUsdcRaw(this.accumulatedSwapFees0, priceWad);
+    return add(this.accumulatedSwapFees1, btcFeesValueUSDC);
+  }
+
+  /** Get accumulated swap fees as percentage of total position value */
+  async getAccumulatedSwapFeesPercentage(): Promise<number> {
+    const totalValue = await this.totalPoolValue();
+    const feesValue = await this.getAccumulatedSwapFeesUsdValue();
+    
+    if (eq(totalValue, ZERO)) return 0;
+    
+    // Return percentage: (feesValue / totalValue) * 100
+    const percentageWad = FullMath.mulDiv(feesValue, WAD, totalValue);
+    return (Number(percentageWad.toString()) / 1e18) * 100;
+  }
+
+  /** Get raw accumulated swap fees for external tracking */
+  getAccumulatedSwapFeesRaw(): { fees0: Big; fees1: Big } {
+    return {
+      fees0: this.accumulatedSwapFees0,
+      fees1: this.accumulatedSwapFees1
+    };
+  }
+
+  /** Get total swap fees (collected + uncollected from active positions) */
+  getTotalSwapFeesRaw(): { fees0: Big; fees1: Big } {
+    // Start with already collected fees
+    let totalFees0 = this.accumulatedSwapFees0;
+    let totalFees1 = this.accumulatedSwapFees1;
+
+    // Add uncollected fees from all active positions
+    const ranges: Array<[number, number]> = [
+      [this.wideLower, this.wideUpper],
+      [this.baseLower, this.baseUpper], 
+      [this.limitLower, this.limitUpper]
+    ];
+
+    for (const [lo, hi] of ranges) {
+      const pos = this.pool.getPosition(this.vaultAddress, lo, hi);
+      if (eq(pos.liquidity, ZERO)) continue;
+
+      // Net fees after manager fee
+      const mf = this.managerFee;
+      const mgr0 = div(mul(pos.tokensOwed0, mf), HUNDRED_PERCENT);
+      const mgr1 = div(mul(pos.tokensOwed1, mf), HUNDRED_PERCENT);
+      
+      const netFee0 = sub(pos.tokensOwed0, mgr0);
+      const netFee1 = sub(pos.tokensOwed1, mgr1);
+
+      totalFees0 = add(totalFees0, netFee0);
+      totalFees1 = add(totalFees1, netFee1);
+    }
+
+    return {
+      fees0: totalFees0,
+      fees1: totalFees1
+    };
   }
 }
 

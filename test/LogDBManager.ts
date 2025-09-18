@@ -58,6 +58,11 @@ export class LogDBManager {
             t.string("swapFeeUSDC", 255);
             t.string("prevCollateralRatio", 255);
             t.string("afterCollateralRatio", 255);
+            t.string("accumulatedSwapFees0", 255);
+            t.string("accumulatedSwapFees1", 255);
+            t.string("btcHoldValueUSDC", 255);
+            t.string("realizedIL", 255);
+            t.string("swapFeesGainedThisPeriod", 255);
             t.text("date");
           }
         );
@@ -80,6 +85,11 @@ export class LogDBManager {
         { name: "swapFeeUSDC", type: "string" },
         { name: "prevCollateralRatio", type: "string" },
         { name: "afterCollateralRatio", type: "string" },
+        { name: "accumulatedSwapFees0", type: "string" },
+        { name: "accumulatedSwapFees1", type: "string" },
+        { name: "btcHoldValueUSDC", type: "string" },
+        { name: "realizedIL", type: "string" },
+        { name: "swapFeesGainedThisPeriod", type: "string" },
         { name: "date", type: "text" },
       ];
 
@@ -117,11 +127,20 @@ export class LogDBManager {
           rebalanceLog.swapFeeUSDC,
           rebalanceLog.prevCollateralRatio,
           rebalanceLog.afterCollateralRatio,
+          rebalanceLog.accumulatedSwapFees0,
+          rebalanceLog.accumulatedSwapFees1,
+          rebalanceLog.btcHoldValueUSDC,
+          rebalanceLog.realizedIL,
+          rebalanceLog.swapFeesGainedThisPeriod,
           rebalanceLog.date,
           trx
         )
       )
       .then((ids) => Promise.resolve(ids[0]));
+  }
+
+  clearRebalanceLog(): Promise<number> {
+    return this.knex("rebalanceLog").del();
   }
 
   close(): Promise<void> {
@@ -144,6 +163,11 @@ export class LogDBManager {
     swapFeeUSDC: BN,
     prevCollateralRatio: BN,
     afterCollateralRatio: BN,
+    accumulatedSwapFees0: BN,
+    accumulatedSwapFees1: BN,
+    btcHoldValueUSDC: BN,
+    realizedIL: BN,
+    swapFeesGainedThisPeriod: BN,
     date: Date,
     trx?: Knex.Transaction
   ): Promise<Array<number>> {
@@ -164,6 +188,11 @@ export class LogDBManager {
         swapFeeUSDC: swapFeeUSDC.toString(),
         prevCollateralRatio: prevCollateralRatio.toString(),
         afterCollateralRatio: afterCollateralRatio.toString(),
+        accumulatedSwapFees0: accumulatedSwapFees0.toString(),
+        accumulatedSwapFees1: accumulatedSwapFees1.toString(),
+        btcHoldValueUSDC: btcHoldValueUSDC.toString(),
+        realizedIL: realizedIL.toString(),
+        swapFeesGainedThisPeriod: swapFeesGainedThisPeriod.toString(),
         date: DateConverter.formatDate(date, DATE_FORMAT),
       },
     ]);
