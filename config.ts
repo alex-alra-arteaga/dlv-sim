@@ -1,10 +1,15 @@
 import { VaultParams } from "./src/charm/types";
 import { LookUpPeriod } from "./src/enums";
+import { setCurrentPoolConfig, ETH_USDT_CONFIG, WBTC_USDC_CONFIG } from "./src/pool-config";
+
+// Initialize the pool configuration (this will be used throughout the application)
+// To use a different pool, change this line to import and set a different configuration
+setCurrentPoolConfig(WBTC_USDC_CONFIG);
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
 
-// WBTC-NECT 0.3% current params
-/// @dev Important to have ticks (thresholds) being divisible by the tick spacing (10 for 5bp, 60 for 30bp, 200 for 1%)
+// Pool-agnostic vault configuration
+// These parameters work for any pool but can be adjusted per pool if needed
 export const charmConfig: VaultParams = {
   managerFee: 0,
   wideRangeWeight: 100000, // 10%

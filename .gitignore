@@ -145,5 +145,5 @@ mochawesome-report/
 .prettierignore
 
 # custom
-rebalance_log_usdc_wbtc_3000.db
+*.db
 rebalance_dashboard.html

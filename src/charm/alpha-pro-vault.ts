@@ -8,6 +8,7 @@ import { Big, VaultParams, JSBI } from "./types";
 import { Engine } from "../engine";
 import { MANAGER, Q96, TARGET_CR, ALLOWED_DUST0, ALLOWED_DUST1 } from "../internal_constants";
 import { dlvConfig } from "../../config";
+import { PoolConfigManager, getCurrentPoolConfig } from "../pool-config";
 import {
   ensure,
   toBig,
@@ -37,6 +38,7 @@ import {
 export class AlphaProVault {
   pool: CorePoolView;
   private vaultAddress!: string; // for pool calls
+  private poolConfig: PoolConfigManager;
 
   /** derived from pool */
   private tickSpacing!: number;
@@ -62,8 +64,8 @@ export class AlphaProVault {
   accruedManagerFees1: Big = ZERO;
 
   /** accumulated swap fees from collected positions */
-  accumulatedSwapFees0: Big = ZERO; // WBTC swap fees collected
-  accumulatedSwapFees1: Big = ZERO; // USDC swap fees collected
+  accumulatedSwapFees0: Big = ZERO; // volatile token swap fees collected
+  accumulatedSwapFees1: Big = ZERO; // stable token swap fees collected
 
   /** ranges */
   wideLower = 0;
@@ -83,6 +85,7 @@ export class AlphaProVault {
   constructor(p: VaultParams, pool: CorePoolView, vaultAddress: `0x${string}` ) {
     this.pool = pool;
     this.vaultAddress = vaultAddress;
+    this.poolConfig = getCurrentPoolConfig();
 
     // keep managerFee; protocol fee removed
     if (p.managerFee > 1_000_000) throw new Error("APV_ManagerFee");
@@ -183,6 +186,16 @@ export class AlphaProVault {
     if (!to) throw new Error("APV_InvalidRecipient");
     if (eq(params.amount0Desired, ZERO) && eq(params.amount1Desired, ZERO)) throw new Error("APV_ZeroDepositAmount");
 
+    const ranges: Array<[number, number]> = [
+      [this.wideLower, this.wideUpper],
+      [this.baseLower, this.baseUpper],
+      [this.limitLower, this.limitUpper],
+    ];
+    for (const [lo, hi] of ranges) {
+      const pos = this.pool.getPosition(this.vaultAddress, lo, hi);
+      if (!eq(pos.liquidity, ZERO)) await engine.burn(this.vaultAddress, lo, hi, ZERO); // poke
+    }
+
     // compute proportional shares/amounts
     const { shares, amount0, amount1 } = await this._calcSharesAndAmounts(
       params.amount0Desired,
@@ -207,11 +220,6 @@ export class AlphaProVault {
 
     // mint proportional liquidity into current ranges
     const sqrtPriceX96 = this.pool.sqrtPriceX96;
-    const ranges: Array<[number, number]> = [
-      [this.wideLower, this.wideUpper],
-      [this.baseLower, this.baseUpper],
-      [this.limitLower, this.limitUpper],
-    ];
 
     let rem0 = amount0;
     let rem1 = amount1;
@@ -224,15 +232,14 @@ export class AlphaProVault {
       let liqToMint = mulDiv(pos.liquidity, shares, ts);
       const liqFromAmts = liquidityForAmounts(lo, hi, rem0, rem1, sqrtPriceX96);
       if (gt(liqToMint, liqFromAmts)) liqToMint = liqFromAmts;
-      if (eq(liqToMint, ZERO)) continue;
 
-      const { amount0: need0, amount1: need1 } = amountsForLiquidity(this.pool, lo, hi, liqToMint, true);
-      rem0 = sub(rem0, need0);
-      rem1 = sub(rem1, need1);
-      this.idle0 = sub(this.idle0, need0);
-      this.idle1 = sub(this.idle1, need1);
+      const { amount0: mint0, amount1: mint1 } =
+        await engine.mint(this.vaultAddress, lo, hi, toU128(liqToMint));
 
-      await engine.mint(this.vaultAddress, lo, hi, toU128(liqToMint));
+      rem0 = sub(rem0, mint0);
+      rem1 = sub(rem1, mint1);
+      this.idle0 = sub(this.idle0, mint0);
+      this.idle1 = sub(this.idle1, mint1);
     }
 
     // mint shares to recipient
@@ -272,40 +279,42 @@ export class AlphaProVault {
       const pos = this.pool.getPosition(this.vaultAddress, lo, hi);
       if (eq(pos.liquidity, ZERO)) continue;
 
+      // 1) compute target liquidity to burn
       const liqShare = toU128(mulDiv(pos.liquidity, params.shares, ts));
       if (eq(liqShare, ZERO)) continue;
 
-      // principal burned (approx)
-      const { amount0: b0, amount1: b1 } = amountsForLiquidity(this.pool, lo, hi, liqShare, false);
-      out0 = add(out0, b0);
-      out1 = add(out1, b1);
+      // 2) get principal to be burned (prefer actual from burn; fallback to amountsForLiquidity)
+      const { amount0: burned0, amount1: burned1 } = await engine.burn(this.vaultAddress, lo, hi, liqShare);
+      // 3) collect ALL owed (principal + full fees)
+      const { amount0: coll0, amount1: coll1 } =
+        await engine.collect(this.vaultAddress, lo, hi, MAX_UINT128, MAX_UINT128);
 
-      // fee share less manager fee
-      const mf = this.managerFee;
-      const fs0 = mulDiv(pos.tokensOwed0, params.shares, ts);
-      const fs1 = mulDiv(pos.tokensOwed1, params.shares, ts);
-      const m0 = div(mul(fs0, mf), HUNDRED_PERCENT);
-      const m1 = div(mul(fs1, mf), HUNDRED_PERCENT);
+      // 4) total fees collected for this position (all shareholders)
+      const feesAll0 = sub(coll0, burned0);
+      const feesAll1 = sub(coll1, burned1);
 
-      this.accruedManagerFees0 = add(this.accruedManagerFees0, m0);
-      this.accruedManagerFees1 = add(this.accruedManagerFees1, m1);
+      // 5) manager fee on ALL fees
+      const mAll0 = div(mul(feesAll0, this.managerFee), HUNDRED_PERCENT);
+      const mAll1 = div(mul(feesAll1, this.managerFee), HUNDRED_PERCENT);
+      this.accruedManagerFees0 = add(this.accruedManagerFees0, mAll0);
+      this.accruedManagerFees1 = add(this.accruedManagerFees1, mAll1);
 
-      const v0 = sub(fs0, m0);
-      const v1 = sub(fs1, m1);
+      // 6) credit vault idle with principal + net fees (everything that stays)
+      const netAll0 = sub(feesAll0, mAll0);
+      const netAll1 = sub(feesAll1, mAll1);
+      this.idle0 = add(this.idle0, add(burned0, netAll0));
+      this.idle1 = add(this.idle1, add(burned1, netAll1));
 
-      // Track proportional accumulated swap fees being withdrawn
+      // 7) withdrawing user gets: their principal + their pro-rata share of NET fees
+      const v0 = mulDiv(netAll0, params.shares, ts);
+      const v1 = mulDiv(netAll1, params.shares, ts);
+
+      out0 = add(out0, add(burned0, v0));
+      out1 = add(out1, add(burned1, v1));
+
+      // 8) track swap fees withdrawn (net)
       this.accumulatedSwapFees0 = add(this.accumulatedSwapFees0, v0);
       this.accumulatedSwapFees1 = add(this.accumulatedSwapFees1, v1);
-
-      out0 = add(out0, v0);
-      out1 = add(out1, v1);
-
-      // reflect burned+fees into idle before user transfer
-      this.idle0 = add(this.idle0, add(b0, v0));
-      this.idle1 = add(this.idle1, add(b1, v1));
-
-      await engine.burn(this.vaultAddress, lo, hi, liqShare);
-      await engine.collect(this.vaultAddress, lo, hi, MAX_UINT128, MAX_UINT128);
     }
 
     if (lt(out0, params.amount0Min)) {
@@ -326,6 +335,12 @@ export class AlphaProVault {
   // === rebalance() ==============================================================
   async rebalance(engine: Engine): Promise<void> {
     await this._assertCanRebalance();
+    
+    // Check the pool config for debugging
+    const poolConfig = getCurrentPoolConfig();
+    console.log(`[REBALANCE START] Pool: ${poolConfig.getDisplayName()}`);
+    console.log(`[REBALANCE START] Idle0: ${this.idle0.toString()}, Idle1: ${this.idle1.toString()}`);
+    console.log(`[REBALANCE START] Pool tick: ${this.pool.tickCurrent}, sqrtPrice: ${this.pool.sqrtPriceX96.toString()}`);
   
     // -------------------- withdraw everything --------------------
     const ranges: Array<[number, number]> = [
@@ -338,34 +353,34 @@ export class AlphaProVault {
     for (const [lo, hi] of ranges) {
       const pos = this.pool.getPosition(this.vaultAddress, lo, hi);
       if (eq(pos.liquidity, ZERO)) continue;
-  
-      const fee0Before = pos.tokensOwed0;
-      const fee1Before = pos.tokensOwed1;
-  
-      await engine.burn(this.vaultAddress, lo, hi, pos.liquidity);
-      const { amount0: coll0, amount1: coll1 } =
-        await engine.collect(this.vaultAddress, lo, hi, MAX_UINT128, MAX_UINT128);
-  
-      // Principal that was in-range at the time of burn:
-      const principal0 = sub(coll0, fee0Before);
-      const principal1 = sub(coll1, fee1Before);
-  
-      // Manager fees only on fees:
-      const m0 = div(mul(fee0Before, this.managerFee), HUNDRED_PERCENT);
-      const m1 = div(mul(fee1Before, this.managerFee), HUNDRED_PERCENT);
-      this.accruedManagerFees0 = add(this.accruedManagerFees0, m0);
-      this.accruedManagerFees1 = add(this.accruedManagerFees1, m1);
-  
-      const netFee0 = sub(fee0Before, m0);
-      const netFee1 = sub(fee1Before, m1);
+        const { amount0: burned0, amount1: burned1 } = await engine.burn(this.vaultAddress, lo, hi, pos.liquidity);
+        const { amount0: coll0, amount1: coll1 } =
+          await engine.collect(this.vaultAddress, lo, hi, MAX_UINT128, MAX_UINT128);
 
-      // Track accumulated swap fees (net fees after manager fee)
-      this.accumulatedSwapFees0 = add(this.accumulatedSwapFees0, netFee0);
-      this.accumulatedSwapFees1 = add(this.accumulatedSwapFees1, netFee1);
+        // assert collect covers principal
+        ensure(JSBI.greaterThanOrEqual(coll0, burned0) && JSBI.greaterThanOrEqual(coll1, burned1),
+          "collect < burned (fees can't be negative)", { coll0: coll0.toString(), burned0: burned0.toString(), coll1: coll1.toString(), burned1: burned1.toString() }
+        );
 
-      // Move everything into idle balances (principal + net fees)
-      this.idle0 = add(this.idle0, add(principal0, netFee0));
-      this.idle1 = add(this.idle1, add(principal1, netFee1));
+        // split fees and accrue manager
+        const feesAll0 = sub(coll0, burned0);
+        const feesAll1 = sub(coll1, burned1);
+        const m0 = div(mul(feesAll0, this.managerFee), HUNDRED_PERCENT);
+        const m1 = div(mul(feesAll1, this.managerFee), HUNDRED_PERCENT);
+        this.accruedManagerFees0 = add(this.accruedManagerFees0, m0);
+        this.accruedManagerFees1 = add(this.accruedManagerFees1, m1);
+
+        // net fees
+        const net0 = sub(feesAll0, m0);
+        const net1 = sub(feesAll1, m1);
+
+        // update fee trackers with ACTUAL net fees
+        this.accumulatedSwapFees0 = add(this.accumulatedSwapFees0, net0);
+        this.accumulatedSwapFees1 = add(this.accumulatedSwapFees1, net1);
+
+        // move everything to idle (principal + net fees)
+        this.idle0 = add(this.idle0, add(burned0, net0));
+        this.idle1 = add(this.idle1, add(burned1, net1));
     }
   
     // === Ground-truth snapshot (no per-range rounding) =========================
@@ -403,7 +418,22 @@ export class AlphaProVault {
     const mintWithExact = async (lo: number, hi: number, liqRaw: JSBI) => {
       const liq = toU128(liqRaw);
       if (eq(liq, ZERO)) return;
+      
+      // Get the amounts needed before minting
       const { amount0: mint0, amount1: mint1 } = await engine.mint(this.vaultAddress, lo, hi, liq);
+      
+      // Check if we have enough idle balance before subtracting
+      if (lt(this.idle0, mint0)) {
+        console.error(`UNDERFLOW WARNING: Insufficient idle0 balance. Have: ${this.idle0.toString()}, Need: ${mint0.toString()}`);
+        console.error(`Position: [${lo}, ${hi}], Liquidity: ${liq.toString()}`);
+        throw new Error("APV_InsufficientIdle0Balance");
+      }
+      if (lt(this.idle1, mint1)) {
+        console.error(`UNDERFLOW WARNING: Insufficient idle1 balance. Have: ${this.idle1.toString()}, Need: ${mint1.toString()}`);
+        console.error(`Position: [${lo}, ${hi}], Liquidity: ${liq.toString()}`);
+        throw new Error("APV_InsufficientIdle1Balance");
+      }
+      
       // Update vault and running totals with ACTUAL amounts the pool took
       this.idle0 = sub(this.idle0, mint0);
       this.idle1 = sub(this.idle1, mint1);
@@ -444,8 +474,8 @@ export class AlphaProVault {
   
     // -------------------- invariants & parity checks ---------------------------
     // 1) Token conservation: what we minted MUST equal what we had in idle
-    const rem0 = balance0; // WBTC left idle
-    const rem1 = balance1; // USDC left idle
+    const rem0 = balance0; // volatile token left idle
+    const rem1 = balance1; // stable token left idle
   
     // Check minted + remaining == before, within tiny dust
     const cons0 = add(minted0Total, rem0);
@@ -504,37 +534,37 @@ export class AlphaProVault {
     
     if (rebalanceBorrowedAmount.mode === "leverage") {
       const SLIPPAGE_PPM = 10; // == 1/100000
-      const amount0Desired = rebalanceBorrowedAmount.btcReceived;
-      const usdcDeposit    = sub(rebalanceBorrowedAmount.borrowUSDC, rebalanceBorrowedAmount.swapUSDCtoWBTC);
+      const amount0Desired = rebalanceBorrowedAmount.volatileReceived;
+      const stableDeposit  = sub(rebalanceBorrowedAmount.borrowStable, rebalanceBorrowedAmount.swapStableToVolatile);
 
       ensure(
-        JSBI.lessThanOrEqual(rebalanceBorrowedAmount.swapUSDCtoWBTC, rebalanceBorrowedAmount.borrowUSDC),
-        "swapUSDCtoWBTC > borrowUSDC (would make USDC deposit negative)",
+        JSBI.lessThanOrEqual(rebalanceBorrowedAmount.swapStableToVolatile, rebalanceBorrowedAmount.borrowStable),
+        "swapStableToVolatile > borrowStable (would make stable deposit negative)",
         {
-          borrowUSDC: rebalanceBorrowedAmount.borrowUSDC.toString(),
-          swapUSDCtoWBTC: rebalanceBorrowedAmount.swapUSDCtoWBTC.toString()
+          borrowStable: rebalanceBorrowedAmount.borrowStable.toString(),
+          swapStableToVolatile: rebalanceBorrowedAmount.swapStableToVolatile.toString()
         }
       );
 
-      let amount0Min = minOutPpm(amount0Desired, SLIPPAGE_PPM, JSBI.BigInt(50));       // ~$0.05 in WBTC units
-      let amount1Min = minOutPpm(usdcDeposit,    SLIPPAGE_PPM, JSBI.BigInt(400_000));  // ~$0.40 in USDC(6dp)
+      let amount0Min = minOutPpm(amount0Desired, SLIPPAGE_PPM, JSBI.BigInt(50));       // ~$0.05 in volatile units
+      let amount1Min = minOutPpm(stableDeposit, SLIPPAGE_PPM, JSBI.BigInt(400_000));  // ~$0.40 in stable units
 
-      if (!(eq(rebalanceBorrowedAmount.btcReceived, ZERO) && eq(usdcDeposit, ZERO))) {
+      if (!(eq(rebalanceBorrowedAmount.volatileReceived, ZERO) && eq(stableDeposit, ZERO))) {
         await this.deposit(engine, {
           sender: MANAGER,
           to: MANAGER,
-          amount0Desired: rebalanceBorrowedAmount.btcReceived,
-          amount1Desired: usdcDeposit,
+          amount0Desired: rebalanceBorrowedAmount.volatileReceived,
+          amount1Desired: stableDeposit,
           amount0Min,
           amount1Min
         });
       }
-      this.virtualDebt = add(this.virtualDebt, rebalanceBorrowedAmount.borrowUSDC);
+      this.virtualDebt = add(this.virtualDebt, rebalanceBorrowedAmount.borrowStable);
     } else if (rebalanceBorrowedAmount.mode === "deleverage") {
       // If no shares to burn, skip withdraw to avoid APV_ZeroShares.
-      let amount0Min = sub(sub(rebalanceBorrowedAmount.withdrawWBTC, div(rebalanceBorrowedAmount.withdrawWBTC, JSBI.BigInt(100000))), JSBI.BigInt(5)); // ~$0.005
+      let amount0Min = sub(sub(rebalanceBorrowedAmount.withdrawVolatile, div(rebalanceBorrowedAmount.withdrawVolatile, JSBI.BigInt(100000))), JSBI.BigInt(5)); // ~$0.005
       if (JSBI.lessThan(amount0Min, ZERO)) amount0Min = ZERO;
-      let amount1Min = sub(sub(rebalanceBorrowedAmount.withdrawUSDC, div(rebalanceBorrowedAmount.withdrawUSDC, JSBI.BigInt(100000))), JSBI.BigInt(5000)); // ~$0.005
+      let amount1Min = sub(sub(rebalanceBorrowedAmount.withdrawStable, div(rebalanceBorrowedAmount.withdrawStable, JSBI.BigInt(100000))), JSBI.BigInt(5000)); // ~$0.005
       if (JSBI.lessThan(amount1Min, ZERO)) amount1Min = ZERO;
 
       if (!JSBI.equal(rebalanceBorrowedAmount.sharesToBurn, ZERO)) {
@@ -546,15 +576,15 @@ export class AlphaProVault {
           amount1Min
         });
       }
-      const repay = rebalanceBorrowedAmount.repayUSDC;
-      console.log("Rebalance debt: repaying " + repay.toString() + " USDC of " + this.virtualDebt.toString() + " virtual debt");
-      this.virtualDebt = sub(this.virtualDebt, rebalanceBorrowedAmount.repayUSDC);
+      const repay = rebalanceBorrowedAmount.repayStable;
+      console.log("Rebalance debt: repaying " + repay.toString() + " stable tokens of " + this.virtualDebt.toString() + " virtual debt");
+      this.virtualDebt = sub(this.virtualDebt, rebalanceBorrowedAmount.repayStable);
     }
     const A1 = await this.getTotalAmounts(false);
 
     const pv = (totals: {total0:JSBI,total1:JSBI}, debt: JSBI) => {
-      const btcV = this.btcRawToUsdcRaw(totals.total0, priceSnap);
-      return sub(add(totals.total1, btcV), debt);
+      const volatileValueInStable = this.volatileToStableValue(totals.total0, priceSnap);
+      return sub(add(totals.total1, volatileValueInStable), debt);
     };
     const pv0 = pv(A0, debt0);
     const pv1 = pv(A1, this.virtualDebt);
@@ -591,29 +621,29 @@ export class AlphaProVault {
       const abs  = (x: JSBI) => (isNeg(x) ? neg(x) : x);
           
       // ---- actual deltas
-      const dUSDC = JSBI.subtract(A1.total1, A0.total1);
-      const dBTC  = JSBI.subtract(A1.total0, A0.total0);
+      const dStable = JSBI.subtract(A1.total1, A0.total1);
+      const dVolatile = JSBI.subtract(A1.total0, A0.total0);
 
       // ---- plan deltas
-      const dUSDC_plan = JSBI.subtract(rebalanceBorrowedAmount.borrowUSDC, rebalanceBorrowedAmount.swapUSDCtoWBTC);        // B − X
-      const dBTC_plan  = rebalanceBorrowedAmount.btcReceived;                 // +btcReceived
+      const dStable_plan = JSBI.subtract(rebalanceBorrowedAmount.borrowStable, rebalanceBorrowedAmount.swapStableToVolatile);        // B − X
+      const dVolatile_plan = rebalanceBorrowedAmount.volatileReceived;                 // +volatileReceived
         
       // ---- signed "extras" (can be negative or positive)
-      const extraUSDC_s = JSBI.subtract(dUSDC, dUSDC_plan);   // may be < 0
-      const extraBTC_s  = JSBI.subtract(dBTC,  dBTC_plan);    // may be < 0
+      const extraStable_s = JSBI.subtract(dStable, dStable_plan);   // may be < 0
+      const extraVolatile_s = JSBI.subtract(dVolatile, dVolatile_plan);    // may be < 0
           
-      // convert BTC extras to USDC at the snap price using ABS, then reapply sign
-      const extraBTCv_abs = this.btcRawToUsdcRaw(abs(extraBTC_s), priceSnap);
-      const extraBTCv_s   = isNeg(extraBTC_s) ? neg(extraBTCv_abs) : extraBTCv_abs;
+      // convert volatile extras to stable at the snap price using ABS, then reapply sign
+      const extraVolatileValueAbs = this.volatileToStableValue(abs(extraVolatile_s), priceSnap);
+      const extraVolatileValueSigned = isNeg(extraVolatile_s) ? neg(extraVolatileValueAbs) : extraVolatileValueAbs;
           
-      // sum of signed extras in USDC
-      const extrasUSDCv_s = JSBI.add(extraUSDC_s, extraBTCv_s);
+      // sum of signed extras in stable
+      const extrasStableValueSigned = JSBI.add(extraStable_s, extraVolatileValueSigned);
           
       // adjust PV by removing any extras (positive extras reduce PV1; negative extras increase PV1)
-      const pv1_adj = JSBI.subtract(pv1, extrasUSDCv_s);
+      const pv1_adj = JSBI.subtract(pv1, extrasStableValueSigned);
   
       // expected PV drop is just the external swap fee
-      const expected = JSBI.subtract(pv0, rebalanceBorrowedAmount.swapFeeUSDC);
+      const expected = JSBI.subtract(pv0, rebalanceBorrowedAmount.swapFeeStable);
   
       // tolerance check (use JSBI for signed diff)
       const diff = JSBI.subtract(expected, pv1_adj);
@@ -624,10 +654,10 @@ export class AlphaProVault {
         JSBI.lessThanOrEqual(absDiff, DUST),
         "PV should drop by swap fee (price-locked, extras stripped, signed-safe)",
         {
-          fee: rebalanceBorrowedAmount.swapFeeUSDC.toString(),
-          extraUSDC_s: extraUSDC_s.toString(),
-          extraBTC_s: extraBTC_s.toString(),
-          extraBTCv_s: extraBTCv_s.toString(),
+          fee: rebalanceBorrowedAmount.swapFeeStable.toString(),
+          extraStable_s: extraStable_s.toString(),
+          extraVolatile_s: extraVolatile_s.toString(),
+          extraVolatileValueSigned: extraVolatileValueSigned.toString(),
           pv0: pv0.toString(),
           pv1Adj: pv1_adj.toString(),
           absDiff: absDiff.toString(),
@@ -635,81 +665,106 @@ export class AlphaProVault {
       );
     }
 
-    return rebalanceBorrowedAmount.swapFeeUSDC;
+    return rebalanceBorrowedAmount.swapFeeStable;
   }
 
-  /// Below functions work on the assumption volatile asset is token0 ///
+  /// Below functions work with pool-agnostic conversion ///
 
-  // USDC raw (1e6) from BTC raw (1e8) using RAW ratio price (token1Raw per token0Raw)
-  btcRawToUsdcRaw(btcRaw: JSBI, priceWadRaw: JSBI): JSBI {
-    // usdcRaw = btcRaw * priceRaw
-    return FullMath.mulDiv(btcRaw, priceWadRaw, WAD);
+  // Convert volatile token amount to stable token amount using price
+  volatileToStable(volatileAmount: JSBI, priceWad: JSBI): JSBI {
+    return this.poolConfig.volatileToStable(volatileAmount, priceWad);
   }
   
-  // BTC raw (1e8) from USDC raw (1e6) using RAW ratio price (token1Raw per token0Raw)
+  // Convert stable token amount to volatile token amount using price  
+  stableToVolatile(stableAmount: JSBI, priceWad: JSBI): JSBI {
+    return this.poolConfig.stableToVolatile(stableAmount, priceWad);
+  }
+
+  // Legacy methods for backwards compatibility
+  // Stable token raw from volatile token raw using RAW ratio price (token1Raw per token0Raw)
+  volatileToStableValue(volatileRaw: JSBI, priceWadRaw: JSBI): JSBI {
+    // Generic: volatile token = token0, stable token = token1
+    return this.volatileToStable(volatileRaw, priceWadRaw);
+  }
+  
+  // Legacy method name for backwards compatibility
+  btcRawToUsdcRaw(btcRaw: JSBI, priceWadRaw: JSBI): JSBI {
+    return this.volatileToStableValue(btcRaw, priceWadRaw);
+  }
+  
+  // Volatile token raw from stable token raw using RAW ratio price (token1Raw per token0Raw)
+  stableToVolatileValue(stableRaw: JSBI, priceWadRaw: JSBI): JSBI {
+    // Generic: stable token = token1, volatile token = token0
+    return this.stableToVolatile(stableRaw, priceWadRaw);
+  }
+  
+  // Legacy method name for backwards compatibility
   usdcRawToBtcRaw(usdcRaw: JSBI, priceWadRaw: JSBI): JSBI {
-    // btcRaw = usdcRaw / priceRaw
-    return FullMath.mulDiv(usdcRaw, WAD, priceWadRaw);
+    return this.stableToVolatileValue(usdcRaw, priceWadRaw);
   }
 
   async totalPoolValue(): Promise<JSBI> {
     const { total0, total1 } = await this.getTotalAmounts();
     const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
-    const btcValueUSDC = this.btcRawToUsdcRaw(total0, priceWad); // << scale applied
-    return sub(add(total1, btcValueUSDC), this.virtualDebt);
+    const volatileValueInStable = this.volatileToStableValue(total0, priceWad);
+    return sub(add(total1, volatileValueInStable), this.virtualDebt);
   }
 
-  // price in WAD (USDC per BTC), no float loss; identical to (sqrtP^2 / Q96^2) * 1e18
+  // price in WAD (stable per volatile token), no float loss; identical to (sqrtP^2 / Q96^2) * 1e18
   poolPrice(sqrtPriceX96: JSBI): JSBI {
     const priceX192 = JSBI.multiply(sqrtPriceX96, sqrtPriceX96);
     // priceWad = priceX192 / 2^192 * 1e18  ==  mulDiv(priceX192, WAD, Q96*Q96)
-    return FullMath.mulDiv(priceX192, WAD, JSBI.multiply(Q96, Q96)); // Adjust for WBTC having 2 more decimals than USDC
+    return FullMath.mulDiv(priceX192, WAD, JSBI.multiply(Q96, Q96)); // Price with token decimal adjustment
   }
 
   private _lpRatioFromRaw(total0: JSBI, total1: JSBI, sqrtPriceX96: JSBI): JSBI {
     const priceWad = this.poolPrice(sqrtPriceX96);         // token1 per token0 in 1e18
-    const btcValueUSDC = this.btcRawToUsdcRaw(total0, priceWad);
-    if (eq(btcValueUSDC, ZERO)) return JSBI.BigInt(Number.MAX_SAFE_INTEGER.toString());
-    return FullMath.mulDiv(total1, WAD, btcValueUSDC);      // (USDC value / BTC value) in WAD
+    const volatileValueInStable = this.volatileToStableValue(total0, priceWad);
+    if (eq(volatileValueInStable, ZERO)) return JSBI.BigInt(Number.MAX_SAFE_INTEGER.toString());
+    return FullMath.mulDiv(total1, WAD, volatileValueInStable);      // (stable value / volatile value) in WAD
   }
 
   // Keep lpRatio() but default to pool-style round-down for parity checks
-  // LP ratio = (USDC value) / (BTC value) in WAD (1.0e18 == 1.0)
-  // btcValueUSDC = total0 * priceWad / 1e18
+  // LP ratio = (stable value) / (volatile value) in WAD (1.0e18 == 1.0)
+  // volatileValueInStable = total0 * priceWad / 1e18
   async lpRatio(roundUp = false): Promise<JSBI> {
     const { total0, total1 } = await this.getTotalAmounts(roundUp);
     return this._lpRatioFromRaw(total0, total1, this.pool.sqrtPriceX96);
   }
 
-  // To comply with AlphaProVault ratio enforcment on deposit/withdraw
-  async usdcAmountForBtcAmount(btcAmount: JSBI): Promise<JSBI> {
-    if (eq(btcAmount, ZERO)) return ZERO;
+  // To comply with AlphaProVault ratio enforcement on deposit/withdraw
+  async stableAmountForVolatileAmount(volatileAmount: JSBI): Promise<JSBI> {
+    if (eq(volatileAmount, ZERO)) return ZERO;
 
     const { total0, total1 } = await this.getTotalAmounts(true);
 
-    // Empty vault → base on current pool price (USDC per BTC, in WAD)
+    // Empty vault → base on current pool price (stable per volatile, in WAD)
     if (eq(total0, ZERO) && eq(total1, ZERO)) {
-      const priceWad = this.poolPrice(this.pool.sqrtPriceX96); // USDC per BTC in 1e18
-      return FullMath.mulDivRoundingUp(btcAmount, priceWad, WAD);
+      const priceWad = this.poolPrice(this.pool.sqrtPriceX96); // stable per volatile in 1e18
+      return FullMath.mulDivRoundingUp(volatileAmount, priceWad, WAD);
     }
 
-    // Existing vault → keep proportions: amount1 = ceil(btcAmount * total1 / total0)
-    if (eq(total0, ZERO)) throw new Error("Vault expects only USDC (total0==0)");
+    // Existing vault → keep proportions: amount1 = ceil(volatileAmount * total1 / total0)
+    if (eq(total0, ZERO)) throw new Error("Vault expects only stable token (total0==0)");
     if (eq(total1, ZERO)) return ZERO;
 
-    const cross = mul(btcAmount, total1);
+    const cross = mul(volatileAmount, total1);
     return ceilDiv(cross, total0);
   }
+  
+  // Legacy method name for backwards compatibility
+  async usdcAmountForBtcAmount(btcAmount: JSBI): Promise<JSBI> {
+    return this.stableAmountForVolatileAmount(btcAmount);
+  }
 
-  // WAD-scaled CR = (totalValueUSDC * 1e18) / debt  (no *100 here)
   private async _collateralRatioWad(roundUp = false): Promise<JSBI> {
     const { total0, total1 } = await this.getTotalAmounts(roundUp);
     const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
     const debt = this.virtualDebt;
     if (eq(debt, ZERO)) return JSBI.BigInt(Number.MAX_SAFE_INTEGER.toString());
-    const btcValueUSDC = this.btcRawToUsdcRaw(total0, priceWad);
-    const totalInUSDC  = add(total1, btcValueUSDC);
-    return FullMath.mulDiv(totalInUSDC, WAD, debt);
+    const volatileValueInStable = this.volatileToStableValue(total0, priceWad);
+    const totalInStable = add(total1, volatileValueInStable);
+    return FullMath.mulDiv(totalInStable, WAD, debt);
   }
 
   async collateralRatio(): Promise<number> {
@@ -717,52 +772,109 @@ export class AlphaProVault {
     return (Number(crWad.toString()) / 1e18) * 100;
   }
 
+  /** ---------- Price helpers ---------- */
+// stable per volatile at a given tick (WAD, 1e18)
+priceAtTickWad(tick: number): JSBI {
+  const sqrtAtTick = TickMath.getSqrtRatioAtTick(tick);
+  return this.poolPrice(sqrtAtTick);
+}
+
+// Optional convenience: convert WAD => number
+private _wadToNum(x: JSBI): number {
+  return Number(x.toString()) / 1e18;
+}
+
+// Humanized stable per volatile (WAD) - applies decimal scaling
+priceStablePerVolatileWad(sqrtPriceX96: JSBI): JSBI {
+  // poolPrice already returns the correct price in WAD format
+  return this.poolPrice(sqrtPriceX96);
+}
+
+// Humanized volatile per stable (WAD)
+priceVolatilePerStableWad(sqrtPriceX96: JSBI): JSBI {
+  const stablePerVolatileWad = this.priceStablePerVolatileWad(sqrtPriceX96);
+  // (1e18 / stablePerVolatileWad) with WAD safety
+  return FullMath.mulDiv(WAD, WAD, stablePerVolatileWad);
+}
+
+// Legacy method names for backward compatibility
+priceUsdcPerBtcWad(sqrtPriceX96: JSBI): JSBI {
+  return this.priceStablePerVolatileWad(sqrtPriceX96);
+}
+
+priceBtcPerUsdcWad(sqrtPriceX96: JSBI): JSBI {
+  return this.priceVolatilePerStableWad(sqrtPriceX96);
+}
+
+// Report ranges in desired units
+async getPositionPriceRanges() {
+  const mk = (lo: number, hi: number) => {
+    const loW = this.priceStablePerVolatileWad(TickMath.getSqrtRatioAtTick(lo));
+    const hiW = this.priceStablePerVolatileWad(TickMath.getSqrtRatioAtTick(hi));
+    return {
+      lowerTick: lo, upperTick: hi,
+      lowerPriceWad: loW, upperPriceWad: hiW,
+      lower: Number(loW.toString()) / 1e18,
+      upper: Number(hiW.toString()) / 1e18,
+    };
+  };
+  return {
+    wide:  mk(this.wideLower,  this.wideUpper),
+    base:  mk(this.baseLower,  this.baseUpper),
+    limit: mk(this.limitLower, this.limitUpper),
+    spot:  {
+      tick: this.pool.tickCurrent,
+      priceWad: this.priceStablePerVolatileWad(this.pool.sqrtPriceX96),
+      price: Number(this.priceStablePerVolatileWad(this.pool.sqrtPriceX96).toString()) / 1e18
+    }
+  };
+}
 
   /**
-   * Decide how much USDC to borrow and how much to swap (USDC<->WBTC) to hit:
+   * Decide how much stable token to borrow and how much to swap (stable<->volatile) to hit:
    * - target LP ratio = 1.0 (50/50) and
    * - target collateral ratio = 200%.
    *
    * Uses fee as a fraction of input (Uniswap V3-style): effective in = in * (1 - fee).
-   * Returns USDC/BTC *amounts* (on-chain native units). All math in integers.
+   * Returns stable/volatile *amounts* (on-chain native units). All math in integers.
    */
   async rebalanceBorrowedAmount(): Promise<
     | {
         mode: "leverage";
-        borrowUSDC: JSBI;
-        swapUSDCtoWBTC: JSBI; // input amount
-        btcReceived: JSBI;     // post-fee BTC tokens
-        swapFeeUSDC: JSBI;     // NEW: fee on USDC->WBTC swap (in USDC)
+        borrowStable: JSBI;
+        swapStableToVolatile: JSBI; // input amount
+        volatileReceived: JSBI;     // post-fee volatile tokens
+        swapFeeStable: JSBI;        // fee on stable->volatile swap (in stable)
         postCR: number;
       }
     | {
         mode: "deleverage";
         sharesToBurn: JSBI;
-        withdrawUSDC: JSBI;
-        withdrawWBTC: JSBI;    // input to BTC->USDC swap
-        repayUSDC: JSBI;       // USDC after swap (post-fee) + withdrawn USDC
-        swapFeeUSDC: JSBI;     // NEW: fee on BTC->USDC swap, expressed in USDC
+        withdrawStable: JSBI;
+        withdrawVolatile: JSBI;    // input to volatile->stable swap
+        repayStable: JSBI;         // stable after swap (post-fee) + withdrawn stable
+        swapFeeStable: JSBI;       // fee on volatile->stable swap, expressed in stable
         postCR: number;
       }
     | { mode: "noop" }
   > {
-    const { total0: BTC0, total1: USDC0 } = await this.getTotalAmounts(false);
-    const D0 = this.virtualDebt; // USDC units
+    const { total0: volatile0, total1: stable0 } = await this.getTotalAmounts(false);
+    const D0 = this.virtualDebt; // stable token units
     const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
-    const btcValUSDC = this.btcRawToUsdcRaw(BTC0, priceWad);
-    const V0 = add(USDC0, btcValUSDC);
+    const volatileValStable = this.volatileToStableValue(volatile0, priceWad);
+    const V0 = add(stable0, volatileValStable);
   
     const feeFloat = dlvConfig?.debtToVolatileSwapFee ?? 0.003;
     const feeNum = JSBI.BigInt(Math.floor(feeFloat * 1_000_000)); // 1e6 scale
     const oneMinusFeeNum = JSBI.subtract(FEE_DEN, feeNum);
     const fWAD = FullMath.mulDiv(WAD, feeNum, FEE_DEN);
   
-    const Rw = await this.lpRatio(true);          // USDC value / BTC value (WAD)
+    const Rw = await this.lpRatio(true);          // stable value / volatile value (WAD)
     const Rplus1WAD = add(Rw, WAD);
     const twoD0 = JSBI.multiply(D0, JSBI.BigInt(2));
   
     if (JSBI.greaterThan(V0, twoD0)) {
-      // ===== Leverage: borrow to reach CR=200%, then swap some USDC -> BTC to match current LP mix.
+      // ===== Leverage: borrow to reach CR=200%, then swap some stable -> volatile to match current LP mix.
       const termR_1_minus_f_WAD = FullMath.mulDiv(Rw, oneMinusFeeNum, FEE_DEN); // R*(1-f) in WAD
       const denomWAD       = add(WAD, termR_1_minus_f_WAD);                     // 1 + R*(1-f)
       const denomPlusFeeWAD= add(denomWAD, fWAD);                               // 1 + R*(1-f) + f
@@ -785,7 +897,7 @@ export class AlphaProVault {
     
       // Nudge B upward by a few raw units if we still overshoot the target due to discreteness
       let { X, swapFeeUSDC, crWad } = sim(B);
-      const MAX_STEPS = 2000; // tiny (~$0.002 in USDC) max adjustments on small positions
+      const MAX_STEPS = 2000; // tiny (~$0.002 in stable) max adjustments on small positions
       let steps = 0;
       if (JSBI.greaterThan(crWad, TARGET_CR_WAD)) {
         // borrow a touch more until crWad <= TARGET (or we hit MAX_STEPS)
@@ -808,16 +920,16 @@ export class AlphaProVault {
       }
     
       // Final amounts with nudged B
-      const xEffUSDC    = sub(X, swapFeeUSDC);
-      const btcReceived = this.usdcRawToBtcRaw(xEffUSDC, priceWad);
+      const xEffStable    = sub(X, swapFeeUSDC);
+      const volatileReceived = this.stableToVolatileValue(xEffStable, priceWad);
       const postCR      = (Number(crWad.toString()) / 1e18) * 100;
     
       return {
         mode: "leverage",
-        borrowUSDC: B,
-        swapUSDCtoWBTC: X,
-        btcReceived,
-        swapFeeUSDC,
+        borrowStable: B,
+        swapStableToVolatile: X,
+        volatileReceived: volatileReceived,
+        swapFeeStable: swapFeeUSDC,
         postCR
       };
 } else if (JSBI.lessThan(V0, twoD0)) {
@@ -829,14 +941,14 @@ export class AlphaProVault {
 
   // --- infeasible or degenerate? withdraw-all fallback
   if (JSBI.lessThanOrEqual(denomDelWAD, ZERO)) {
-    // withdraw-all (unchanged from your code)
+    // withdraw-all fallback
     const sharesAll = this.totalSupply;
-    const usdcOutAll = USDC0;
-    const btcOutAll  = BTC0;
-    const btcValAllUSDC = this.btcRawToUsdcRaw(btcOutAll, priceWad);
-    const swapFeeUSDC = FullMath.mulDiv(btcValAllUSDC, feeNum, FEE_DEN);
-    const usdcFromBtc = sub(btcValAllUSDC, swapFeeUSDC);
-    const repay = add(usdcOutAll, usdcFromBtc);
+    const stableOutAll = stable0;
+    const volatileOutAll = volatile0;
+    const volatileValAllStable = this.volatileToStableValue(volatileOutAll, priceWad);
+    const swapFeeStable = FullMath.mulDiv(volatileValAllStable, feeNum, FEE_DEN);
+    const stableFromVolatile = sub(volatileValAllStable, swapFeeStable);
+    const repay = add(stableOutAll, stableFromVolatile);
     const repayClamped = JSBI.lessThan(repay, D0) ? repay : D0;
 
     const V1 = ZERO;
@@ -846,10 +958,10 @@ export class AlphaProVault {
     return {
       mode: "deleverage",
       sharesToBurn: sharesAll,
-      withdrawUSDC: usdcOutAll,
-      withdrawWBTC: btcOutAll,
-      repayUSDC: repayClamped,
-      swapFeeUSDC,
+      withdrawStable: stableOutAll,
+      withdrawVolatile: volatileOutAll,
+      repayStable: repayClamped,
+      swapFeeStable: swapFeeStable,
       postCR
     };
   }
@@ -867,15 +979,15 @@ export class AlphaProVault {
   const Wcap = JSBI.lessThanOrEqual(W, V0) ? W : V0;
 
   // composition at current mix
-  const usdcOut   = FullMath.mulDiv(Wcap, Rw, Rplus1WAD);
-  const btcValOut = sub(Wcap, usdcOut);
-  const swapFeeUSDC = FullMath.mulDiv(btcValOut, feeNum, FEE_DEN);
-  const usdcFromBtc = sub(btcValOut, swapFeeUSDC);
+  const stableOut = FullMath.mulDiv(Wcap, Rw, Rplus1WAD);
+  const volatileValOut = sub(Wcap, stableOut);
+  const swapFeeStable = FullMath.mulDiv(volatileValOut, feeNum, FEE_DEN);
+  const stableFromVolatile = sub(volatileValOut, swapFeeStable);
 
-  const repay = add(usdcOut, usdcFromBtc);
+  const repay = add(stableOut, stableFromVolatile);
   const repayClamped = JSBI.lessThan(repay, D0) ? repay : D0;
 
-  const btcOut = this.usdcRawToBtcRaw(btcValOut, priceWad);
+  const volatileOut = this.stableToVolatileValue(volatileValOut, priceWad);
 
   // cap shares to totalSupply (avoid >100% burn)
   const sharesToBurnRaw = eq(V0, ZERO) ? ZERO : FullMath.mulDiv(this.totalSupply, Wcap, V0);
@@ -889,10 +1001,10 @@ export class AlphaProVault {
   return {
     mode: "deleverage",
     sharesToBurn,
-    withdrawUSDC: usdcOut,
-    withdrawWBTC: btcOut,
-    repayUSDC: repayClamped,
-    swapFeeUSDC,
+    withdrawStable: stableOut,
+    withdrawVolatile: volatileOut,
+    repayStable: repayClamped,
+    swapFeeStable: swapFeeStable,
     postCR
   };
     } else {
@@ -1010,17 +1122,22 @@ export class AlphaProVault {
     return t;
   }
 
-  /** Get accumulated swap fees in USD value using current price */
+  /** Get accumulated swap fees in stable token value using current price */
+  async getAccumulatedSwapFeesStableValue(): Promise<JSBI> {
+    const priceWad = this.poolPrice(this.pool.sqrtPriceX96); // stable per volatile in WAD
+    const volatileFeesValueInStable = this.volatileToStableValue(this.accumulatedSwapFees0, priceWad);
+    return add(this.accumulatedSwapFees1, volatileFeesValueInStable);
+  }
+
+  /** Legacy method name for backward compatibility */
   async getAccumulatedSwapFeesUsdValue(): Promise<JSBI> {
-    const priceWad = this.poolPrice(this.pool.sqrtPriceX96); // USDC per WBTC in WAD
-    const btcFeesValueUSDC = this.btcRawToUsdcRaw(this.accumulatedSwapFees0, priceWad);
-    return add(this.accumulatedSwapFees1, btcFeesValueUSDC);
+    return this.getAccumulatedSwapFeesStableValue();
   }
 
   /** Get accumulated swap fees as percentage of total position value */
   async getAccumulatedSwapFeesPercentage(): Promise<number> {
     const totalValue = await this.totalPoolValue();
-    const feesValue = await this.getAccumulatedSwapFeesUsdValue();
+    const feesValue = await this.getAccumulatedSwapFeesStableValue();
     
     if (eq(totalValue, ZERO)) return 0;
     

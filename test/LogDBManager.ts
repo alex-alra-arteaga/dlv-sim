@@ -55,12 +55,12 @@ export class LogDBManager {
             t.string("prevTotalPoolValue", 255);
             t.string("afterTotalPoolValue", 255);
             t.string("lpRatio", 255);
-            t.string("swapFeeUSDC", 255);
+            t.string("swapFeeStable", 255);
             t.string("prevCollateralRatio", 255);
             t.string("afterCollateralRatio", 255);
             t.string("accumulatedSwapFees0", 255);
             t.string("accumulatedSwapFees1", 255);
-            t.string("btcHoldValueUSDC", 255);
+            t.string("volatileHoldValueStable", 255);
             t.string("realizedIL", 255);
             t.string("swapFeesGainedThisPeriod", 255);
             t.text("date");
@@ -82,12 +82,12 @@ export class LogDBManager {
         { name: "prevTotalPoolValue", type: "string" },
         { name: "afterTotalPoolValue", type: "string" },
         { name: "lpRatio", type: "string" },
-        { name: "swapFeeUSDC", type: "string" },
+        { name: "swapFeeStable", type: "string" },
         { name: "prevCollateralRatio", type: "string" },
         { name: "afterCollateralRatio", type: "string" },
         { name: "accumulatedSwapFees0", type: "string" },
         { name: "accumulatedSwapFees1", type: "string" },
-        { name: "btcHoldValueUSDC", type: "string" },
+        { name: "volatileHoldValueStable", type: "string" },
         { name: "realizedIL", type: "string" },
         { name: "swapFeesGainedThisPeriod", type: "string" },
         { name: "date", type: "text" },
@@ -124,12 +124,12 @@ export class LogDBManager {
           rebalanceLog.prevTotalPoolValue,
           rebalanceLog.afterTotalPoolValue,
           rebalanceLog.lpRatio,
-          rebalanceLog.swapFeeUSDC,
+          rebalanceLog.swapFeeStable,
           rebalanceLog.prevCollateralRatio,
           rebalanceLog.afterCollateralRatio,
           rebalanceLog.accumulatedSwapFees0,
           rebalanceLog.accumulatedSwapFees1,
-          rebalanceLog.btcHoldValueUSDC,
+          rebalanceLog.volatileHoldValueStable,
           rebalanceLog.realizedIL,
           rebalanceLog.swapFeesGainedThisPeriod,
           rebalanceLog.date,
@@ -160,12 +160,12 @@ export class LogDBManager {
     prevTotalPoolValue: BN,
     afterTotalPoolValue: BN,
     lpRatio: BN,
-    swapFeeUSDC: BN,
+    swapFeeStable: BN,
     prevCollateralRatio: BN,
     afterCollateralRatio: BN,
     accumulatedSwapFees0: BN,
     accumulatedSwapFees1: BN,
-    btcHoldValueUSDC: BN,
+    volatileHoldValueStable: BN,
     realizedIL: BN,
     swapFeesGainedThisPeriod: BN,
     date: Date,
@@ -185,12 +185,12 @@ export class LogDBManager {
         prevTotalPoolValue: prevTotalPoolValue.toString(),
         afterTotalPoolValue: afterTotalPoolValue.toString(),
         lpRatio: lpRatio.toString(),
-        swapFeeUSDC: swapFeeUSDC.toString(),
+        swapFeeStable: swapFeeStable.toString(),
         prevCollateralRatio: prevCollateralRatio.toString(),
         afterCollateralRatio: afterCollateralRatio.toString(),
         accumulatedSwapFees0: accumulatedSwapFees0.toString(),
         accumulatedSwapFees1: accumulatedSwapFees1.toString(),
-        btcHoldValueUSDC: btcHoldValueUSDC.toString(),
+        volatileHoldValueStable: volatileHoldValueStable.toString(),
         realizedIL: realizedIL.toString(),
         swapFeesGainedThisPeriod: swapFeesGainedThisPeriod.toString(),
         date: DateConverter.formatDate(date, DATE_FORMAT),

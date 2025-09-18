@@ -6,20 +6,36 @@ import Decimal from "decimal.js-light";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import customParse from "dayjs/plugin/customParseFormat.js";
+import { getCurrentPoolConfig } from "../src/pool-config";
+import { TickMath, FullMath } from "@bella-defintech/uniswap-v3-simulator";
+import JSBI from "jsbi";
+
 dayjs.extend(utc);
 dayjs.extend(customParse);
 
 /** ------- CONFIG -------- */
+// Get dynamic configuration from pool config
+const poolConfig = getCurrentPoolConfig();
+
 const CONFIG = {
-  sqlitePath: "./rebalance_log_usdc_wbtc_3000.db",
+  sqlitePath: poolConfig.getRebalanceLogDbPath(),
   tableName: "rebalanceLog",
   outFile: "rebalance_dashboard.html",
 
-  // token decimals (adjust if your schema differs)
-  asset0Symbol: "WBTC",
-  asset1Symbol: "USDC",
-  asset0Decimals: 8,  // total0
-  asset1Decimals: 6,  // total1
+  // token decimals (from pool configuration)
+  asset0Symbol: poolConfig.getToken0Symbol(),
+  asset1Symbol: poolConfig.getToken1Symbol(),
+  asset0Decimals: poolConfig.getToken0Decimals(),
+  asset1Decimals: poolConfig.getToken1Decimals(),
+  
+  // volatile and stable token info
+  volatileSymbol: poolConfig.getVolatileSymbol(),
+  stableSymbol: poolConfig.getStableSymbol(),
+  volatileName: poolConfig.getVolatileName(),
+  stableName: poolConfig.getStableName(),
+  
+  // pool display info
+  poolDisplayName: poolConfig.getDisplayName(),
 
   // fixed end date (inclusive)
   endDateUtc: dayjs.utc("2024-12-15").endOf("day").valueOf(),
@@ -45,13 +61,13 @@ type RawRow = {
   nonVolatileAssetPrice: string; // 18
   prevTotalPoolValue: string;    // 8
   afterTotalPoolValue: string;   // 8
-  lpRatio: string;               // 1e18 == perfectly balanced (higher => more USDC)
-  swapFeeUSDC: string;           // assumed native USDC units (override if needed)
+  lpRatio: string;               // 1e18 == perfectly balanced (higher => more stable)
+  swapFeeStable: string;         // assumed native stable token units
   prevCollateralRatio: string;   // 8
   afterCollateralRatio: string;  // 8
-  accumulatedSwapFees0: string;  // accumulated WBTC swap fees collected
-  accumulatedSwapFees1: string;  // accumulated USDC swap fees collected
-  btcHoldValueUSDC: string;      // value if we held BTC from start
+  accumulatedSwapFees0: string;  // accumulated token0 swap fees collected
+  accumulatedSwapFees1: string;  // accumulated token1 swap fees collected
+  volatileHoldValueStable: string; // value if we held volatile token from start
   realizedIL: string;            // realized impermanent loss
   swapFeesGainedThisPeriod: string; // swap fees gained during this period
   date: string;
@@ -59,26 +75,29 @@ type RawRow = {
 
 type ParsedRow = {
   t: number; // unix ms (UTC)
-  // price bands (assumed: 0=lower, 1=upper)
+  // price bands (assumed: 0=lower, 1=upper) - converted to prices
   wide0: number; wide1: number;
   base0: number; base1: number;
   limit0: number; limit1: number;
-  // inventory (scaled to human units)
-  wbtc: number; usdc: number;
+  // raw tick values for width calculations
+  wide0Tick: number; wide1Tick: number;
+  base0Tick: number; base1Tick: number;
+  limit0Tick: number; limit1Tick: number;
   // series (scaled)
-  price: number;              // BTC in USDC
-  vaultValue: number;         // position value in USDC
-  feeUSDC: number;            // swap fees (USDC)
+  price: number;              // volatile token price in stable token
+  vaultValue: number;         // position value in stable token
   lpRatio: number;            // normalized (1 == balanced)
   prevCR: number; afterCR: number; // 0..?
-  accumulatedSwapFees0Raw: number; // accumulated WBTC swap fees (raw units)
-  accumulatedSwapFees1Raw: number; // accumulated USDC swap fees (raw units)
+  accumulatedSwapFees0Raw: number; // accumulated token0 swap fees (raw units)
+  accumulatedSwapFees1Raw: number; // accumulated token1 swap fees (raw units)
   accumulatedSwapFeesUsd: number;  // accumulated swap fees in USD value
   accumulatedSwapFeesPercent: number; // accumulated swap fees as % of position
-  // IL tracking
-  btcHoldValueUSDC: number;    // value if we held BTC from start
-  realizedIL: number;          // realized impermanent loss in USDC
+  volatileHoldValueStable: number; // value if we held volatile token from start (in stable token)
+  realizedIL: number;          // realized impermanent loss in stable token
   swapFeesGainedThisPeriod: number; // swap fees gained during this period
+} & {
+  // Dynamic properties that depend on pool configuration
+  [key: string]: number; // allows volatile, stable, feeStable, btcHoldValueInStable, etc.
 };
 
 function toNum(s: string): number {
@@ -101,23 +120,47 @@ function parseDate(s: string): number {
   throw new Error(`Unparseable date: "${s}"`);
 }
 
+// Convert tick to price using the same logic as the vault
+function tickToPrice(tick: number): number {
+  if (!Number.isFinite(tick)) return 0;
+  
+  // Get sqrt price at tick
+  const sqrtPriceX96 = TickMath.getSqrtRatioAtTick(tick);
+  
+  // Convert to price: (sqrtPriceX96^2 / 2^192) * 10^18
+  const priceX192 = JSBI.multiply(sqrtPriceX96, sqrtPriceX96);
+  const Q96 = JSBI.exponentiate(JSBI.BigInt(2), JSBI.BigInt(96));
+  const WAD = JSBI.BigInt("1000000000000000000"); // 1e18
+  
+  // priceWad = priceX192 / 2^192 * 1e18
+  const priceWad = FullMath.mulDiv(priceX192, WAD, JSBI.multiply(Q96, Q96));
+  
+  // Apply decimal scaling for token pair
+  // e.g. WBTC-USDC: WBTC has 8 decimals, USDC has 6 decimals
+  // Need to multiply by 10^(asset0Decimals - asset1Decimals) = 10^(8-6) = 100
+  const decimalAdjustment = Math.pow(10, CONFIG.asset0Decimals - CONFIG.asset1Decimals);
+  
+  // Convert JSBI to number and apply decimal adjustment
+  return (Number(priceWad.toString()) / 1e18) * decimalAdjustment;
+}
+
 function parseRow(r: RawRow): ParsedRow {
-  return {
+  const result: ParsedRow = {
     t: parseDate(r.date),
 
-    // price ranges: assuming already in price units; change if your DB stores scaled ints
-    wide0: toNum(r.wide0),  wide1: toNum(r.wide1),
-    base0: toNum(r.base0),  base1: toNum(r.base1),
-    limit0: toNum(r.limit0),limit1: toNum(r.limit1),
+    // Convert tick values to prices - these are stored as ticks in the database
+    wide0: tickToPrice(toNum(r.wide0)),   wide1: tickToPrice(toNum(r.wide1)),
+    base0: tickToPrice(toNum(r.base0)),   base1: tickToPrice(toNum(r.base1)),
+    limit0: tickToPrice(toNum(r.limit0)), limit1: tickToPrice(toNum(r.limit1)),
 
-    // inventory (scale by token decimals)
-    wbtc: toNum(r.total0) / 10 ** CONFIG.asset0Decimals,
-    usdc: toNum(r.total1) / 10 ** CONFIG.asset1Decimals,
+    // Store raw tick values for width calculations
+    wide0Tick: toNum(r.wide0),   wide1Tick: toNum(r.wide1),
+    base0Tick: toNum(r.base0),   base1Tick: toNum(r.base1),
+    limit0Tick: toNum(r.limit0), limit1Tick: toNum(r.limit1),
 
     // scaled fields
     price:       toNum(r.nonVolatileAssetPrice) / 1e18,
     vaultValue:  toNum(r.afterTotalPoolValue)   / 1e6,  // Scale by another 10x (1e6 instead of 1e7)
-    feeUSDC:     toNum(r.swapFeeUSDC) / 1e6,
     lpRatio:     toNum(r.lpRatio) / 1e18,
     prevCR:      toNum(r.prevCollateralRatio)  / 100,  // Changed from 1e8 to 100
     afterCR:     toNum(r.afterCollateralRatio) / 100,  // Changed from 1e8 to 100
@@ -127,20 +170,28 @@ function parseRow(r: RawRow): ParsedRow {
     accumulatedSwapFees1Raw: toNum(r.accumulatedSwapFees1 || "0") / 10 ** CONFIG.asset1Decimals,
     
     // IL tracking fields
-    btcHoldValueUSDC: toNum(r.btcHoldValueUSDC || "0") / 1e6,
     realizedIL: toNum(r.realizedIL || "0") / 100, // convert from basis points to percentage (10000 basis points = 100%)
     swapFeesGainedThisPeriod: toNum(r.swapFeesGainedThisPeriod || "0") / 1e6,
     
     // computed fields (will be calculated below)
     accumulatedSwapFeesUsd: 0,
     accumulatedSwapFeesPercent: 0,
+    volatileHoldValueStable: toNum(r.volatileHoldValueStable || "0") / 1e6,
   };
+
+  // Add dynamic token properties
+  result[CONFIG.asset0Symbol.toLowerCase()] = toNum(r.total0) / 10 ** CONFIG.asset0Decimals;
+  result[CONFIG.asset1Symbol.toLowerCase()] = toNum(r.total1) / 10 ** CONFIG.asset1Decimals;
+  result[`fee${CONFIG.stableSymbol}`] = toNum(r.swapFeeStable) / 1e6;
+  result[`${CONFIG.volatileSymbol.toLowerCase()}HoldValue${CONFIG.stableSymbol}`] = toNum(r.volatileHoldValueStable || "0") / 1e6;
+
+  return result;
 }
 
 function postProcessSwapFees(row: ParsedRow): ParsedRow {
   // Calculate USD value of accumulated swap fees using current price
-  const btcFeesUsd = row.accumulatedSwapFees0Raw * row.price;
-  row.accumulatedSwapFeesUsd = row.accumulatedSwapFees1Raw + btcFeesUsd;
+  const volatileFeesUsd = row.accumulatedSwapFees0Raw * row.price;
+  row.accumulatedSwapFeesUsd = row.accumulatedSwapFees1Raw + volatileFeesUsd;
   
   // Calculate percentage of position value
   if (row.vaultValue > 0) {
@@ -179,12 +230,21 @@ function aggregate(rows: Series, g: Grain): Series {
   for (const [k, arr] of map) {
     const n = arr.length;
     const sum = (p: (x: ParsedRow) => number) => arr.reduce((a, b) => a + p(b), 0);
+    const token0Key = CONFIG.asset0Symbol.toLowerCase();
+    const token1Key = CONFIG.asset1Symbol.toLowerCase();
+    
     out.push({
       t: k,
       wide0: sum(x => x.wide0) / n,  wide1: sum(x => x.wide1) / n,
       base0: sum(x => x.base0) / n,  base1: sum(x => x.base1) / n,
       limit0: sum(x => x.limit0) / n,limit1: sum(x => x.limit1) / n,
-      wbtc:  sum(x => x.wbtc)  / n,  usdc:  sum(x => x.usdc)  / n,
+      // Include tick values for width calculations
+      wide0Tick: sum(x => x.wide0Tick) / n,  wide1Tick: sum(x => x.wide1Tick) / n,
+      base0Tick: sum(x => x.base0Tick) / n,  base1Tick: sum(x => x.base1Tick) / n,
+      limit0Tick: sum(x => x.limit0Tick) / n, limit1Tick: sum(x => x.limit1Tick) / n,
+      // Use dynamic token symbols for aggregation
+      [token0Key]: sum(x => x[token0Key]) / n,
+      [token1Key]: sum(x => x[token1Key]) / n,
       price: sum(x => x.price) / n,  vaultValue: sum(x => x.vaultValue) / n,
       feeUSDC: sum(x => x.feeUSDC),  // sum fees within bucket
       lpRatio: sum(x => x.lpRatio) / n,
@@ -195,7 +255,7 @@ function aggregate(rows: Series, g: Grain): Series {
       accumulatedSwapFeesUsd: arr[arr.length - 1].accumulatedSwapFeesUsd,
       accumulatedSwapFeesPercent: arr[arr.length - 1].accumulatedSwapFeesPercent,
       // IL tracking - take last values for accumulated metrics
-      btcHoldValueUSDC: arr[arr.length - 1].btcHoldValueUSDC,
+      volatileHoldValueStable: arr[arr.length - 1].volatileHoldValueStable,
       realizedIL: arr[arr.length - 1].realizedIL,
       swapFeesGainedThisPeriod: sum(x => x.swapFeesGainedThisPeriod), // sum over period
     });
@@ -204,7 +264,7 @@ function aggregate(rows: Series, g: Grain): Series {
   return out;
 }
 
-function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: Series; a0: string; a1: string }): string {
+function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: Series; a0: string; a1: string; volatileSymbol: string; stableSymbol: string }): string {
   const dataJSON = JSON.stringify(payload);
   return `<!doctype html>
 <html lang="en">
@@ -245,13 +305,13 @@ function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: 
   </div>
 
   <div class="row">
-    <div class="card"><h2>Vault vs Hold (0.01 ${payload.a0})</h2><div id="perf"></div></div>
+    <div class="card"><h2>Vault vs Hold (0.01 ${payload.volatileSymbol})</h2><div id="perf"></div></div>
     <div class="card"><h2>Position Ranges (wide/base/limit)</h2><div id="ranges"></div></div>
-    <div class="card"><h2>${payload.a0} vs ${payload.a1} Share</h2><div id="shares"></div></div>
+    <div class="card"><h2>${payload.volatileSymbol} vs ${payload.stableSymbol} Share</h2><div id="shares"></div></div>
     <div class="card"><h2>Collateral Ratio (target 200%)</h2><div id="cr"></div></div>
     <div class="card"><h2>Accumulated Swap Fee Cost</h2><div id="fees"></div></div>
     <div class="card"><h2>Swap fees collected</h2><div id="swapFeesCollected"></div></div>
-    <div class="card"><h2>Impermanent Loss vs BTC Hold Strategy</h2><div id="realizedIL"></div></div>
+    <div class="card"><h2>Impermanent Loss vs ${payload.volatileSymbol} Hold Strategy</h2><div id="realizedIL"></div></div>
     <div class="card"><h2>Position Range Widths</h2><div id="widths"></div></div>
     <div class="card"><h2>Portfolio Value Breakdown</h2><div id="portfolio"></div></div>
     <div class="card"><h2>Collateral Ratio Changes</h2><div id="crchange"></div></div>
@@ -310,7 +370,7 @@ function perfSeries(data, grain) {
   const common = { ...hoverLines };
   return [
     { ...common, name:'Vault %', x, y: vaultPct, line:{color:'var(--blue)'} },
-    { ...common, name:'Hold % (0.01 ${payload.a0})', x, y: holdPct, line:{color:'var(--pink)'} }
+    { ...common, name:\`Hold % (0.01 \${PAYLOAD.volatileSymbol})\`, x, y: holdPct, line:{color:'var(--pink)'} }
   ];
 }
 
@@ -331,20 +391,20 @@ function rangesSeries(data){
 
 function sharesSeries(data){
   const x = xDates(data);
-  // lpRatio is normalized to 1 == 50:50 (more USDC when >1)
+  // lpRatio is normalized to 1 == 50:50 (more stable token when >1)
   const r = data.map(d => Math.max(0, d.lpRatio || 0));
 
   // Convert ratio to % shares
-  const usdcShare = r.map(v => 100 * (v / (1 + v)));   // e.g. r=2 => 66.67%
-  const wbtcShare = usdcShare.map(s => 100 - s);        // complement
+  const stableShare = r.map(v => 100 * (v / (1 + v)));   // e.g. r=2 => 66.67%
+  const volatileShare = stableShare.map(s => 100 - s);        // complement
 
   return [
-    { type:'scatter', mode:'lines', name:'WBTC share (LP)', x, y:wbtcShare, stackgroup:'one',
+    { type:'scatter', mode:'lines', name:\`\${PAYLOAD.volatileSymbol} share (LP)\`, x, y:volatileShare, stackgroup:'one',
       line:{color:'var(--blue)'},
-      hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>WBTC: %{y:.2f}%<extra></extra>' },
-    { type:'scatter', mode:'lines', name:'USDC share (LP)', x, y:usdcShare, stackgroup:'one',
+      hovertemplate:\`%{x|%Y-%m-%d %H:%M}<br>\${PAYLOAD.volatileSymbol}: %{y:.2f}%<extra></extra>\` },
+    { type:'scatter', mode:'lines', name:\`\${PAYLOAD.stableSymbol} share (LP)\`, x, y:stableShare, stackgroup:'one',
       line:{color:'var(--pink)'},
-      hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>USDC: %{y:.2f}%<extra></extra>' }
+      hovertemplate:\`%{x|%Y-%m-%d %H:%M}<br>\${PAYLOAD.stableSymbol}: %{y:.2f}%<extra></extra>\` }
   ];
 }
 
@@ -383,11 +443,11 @@ function feesSeries(data){
   const x = xDates(data);
   const cumFees = [];
   let acc = 0;
-  for (const d of data){ acc += d.feeUSDC || 0; cumFees.push(acc); }
+  for (const d of data){ acc += d[\`fee\${PAYLOAD.stableSymbol}\`] || 0; cumFees.push(acc); }
   const pct = data.map((d,i) => d.vaultValue ? (cumFees[i] / d.vaultValue) : 0);
 
   return [
-    { ...hoverLines, name:'Cumulative fees (USDC)', x, y:cumFees, line:{color:'var(--blue)'} },
+    { ...hoverLines, name:\`Cumulative fees (\${PAYLOAD.stableSymbol})\`, x, y:cumFees, line:{color:'var(--blue)'} },
     { ...hoverLines, name:'Fees as % of position', x, y:pct, yaxis:'y2', line:{color:'var(--pink)'},
       hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>%{y:.2f}%<extra></extra>' }
   ];
@@ -413,21 +473,22 @@ function realizedILSeries(data){
   // Negative = vault outperformed (impermanent gain)
   const realizedILPercent = data.map(d => d.realizedIL);
   
-  const btcHoldValue = data.map(d => d.btcHoldValueUSDC);
+  const volatileHoldValue = data.map(d => d[\`\${PAYLOAD.volatileSymbol.toLowerCase()}HoldValue\${PAYLOAD.stableSymbol}\`]);
   const vaultValue = data.map(d => d.vaultValue);
 
   return [
     { ...hoverLines, name:'Impermanent Loss (%)', x, y:realizedILPercent, line:{color:'#ef4444', width:3} },
-    { ...hoverLines, name:'BTC Hold Value (USDC)', x, y:btcHoldValue, yaxis:'y2', line:{color:'#f97316'}, visible:'legendonly' },
-    { ...hoverLines, name:'Vault Value (USDC)', x, y:vaultValue, yaxis:'y2', line:{color:'#22c55e'}, visible:'legendonly' }
+    { ...hoverLines, name:\`\${PAYLOAD.volatileSymbol} Hold Value (\${PAYLOAD.stableSymbol})\`, x, y:volatileHoldValue, yaxis:'y2', line:{color:'#f97316'}, visible:'legendonly' },
+    { ...hoverLines, name:\`Vault Value (\${PAYLOAD.stableSymbol})\`, x, y:vaultValue, yaxis:'y2', line:{color:'#22c55e'}, visible:'legendonly' }
   ];
 }
 
 function rangeWidthSeries(data){
   const x = xDates(data);
-  const wideWidth = data.map(d => d.wide1 - d.wide0);
-  const baseWidth = data.map(d => d.base1 - d.base0);
-  const limitWidth = data.map(d => d.limit1 - d.limit0);
+  // Use raw tick values for width calculations to show actual tick differences
+  const wideWidth = data.map(d => d.wide1Tick - d.wide0Tick);
+  const baseWidth = data.map(d => d.base1Tick - d.base0Tick);
+  const limitWidth = data.map(d => d.limit1Tick - d.limit0Tick);
 
   return [
     { ...hoverLines, name:'Wide range width', x, y:wideWidth, line:{color:'var(--band-gray)'} },
@@ -440,20 +501,20 @@ function portfolioValueSeries(data){
   const x = xDates(data);
   // Use vault value as authoritative total, derive asset splits from LP ratio
   const totalValue = data.map(d => d.vaultValue);
-  const usdcValue = data.map(d => {
+  const stableValue = data.map(d => {
     const ratio = d.lpRatio || 1;
-    // lpRatio > 1 means more USDC weight
+    // lpRatio > 1 means more stable token weight
     return d.vaultValue * (ratio / (1 + ratio));
   });
-  const wbtcValue = data.map((d,i) => totalValue[i] - usdcValue[i]);
+  const volatileValue = data.map((d,i) => totalValue[i] - stableValue[i]);
 
   return [
-    { type:'scatter', mode:'lines', name:'WBTC value (USDC)', x, y:wbtcValue, stackgroup:'one',
+    { type:'scatter', mode:'lines', name:\`\${PAYLOAD.volatileSymbol} value (\${PAYLOAD.stableSymbol})\`, x, y:volatileValue, stackgroup:'one',
       line:{color:'var(--blue)'},
-      hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>WBTC: $%{y:,.0f}<extra></extra>' },
-    { type:'scatter', mode:'lines', name:'USDC value', x, y:usdcValue, stackgroup:'one',
+      hovertemplate:\`%{x|%Y-%m-%d %H:%M}<br>\${PAYLOAD.volatileSymbol}: $%{y:,.0f}<extra></extra>\` },
+    { type:'scatter', mode:'lines', name:\`\${PAYLOAD.stableSymbol} value\`, x, y:stableValue, stackgroup:'one',
       line:{color:'var(--pink)'},
-      hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>USDC: $%{y:,.0f}<extra></extra>' },
+      hovertemplate:\`%{x|%Y-%m-%d %H:%M}<br>\${PAYLOAD.stableSymbol}: $%{y:,.0f}<extra></extra>\` },
     { ...hoverLines, name:'Total portfolio value', x, y:totalValue, line:{color:'#000', width:2},
       hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>Total: $%{y:,.0f}<extra></extra>' }
   ];
@@ -489,15 +550,15 @@ function render(grain='raw'){
   const data = PAYLOAD[grain];
 
   Plotly.react('perf',   perfSeries(data, grain),   layout('Vault vs Hold', '% Return'));
-  Plotly.react('ranges', rangesSeries(data),        layout('Position price ranges', 'Price (USDC)'));
-  Plotly.react('shares', sharesSeries(data),        layout('${payload.a0} vs ${payload.a1} share', '% of portfolio'));
+  Plotly.react('ranges', rangesSeries(data),        layout('Position price ranges', \`Price (\${PAYLOAD.stableSymbol})\`));
+  Plotly.react('shares', sharesSeries(data),        layout(\`\${PAYLOAD.volatileSymbol} vs \${PAYLOAD.stableSymbol} share\`, '% of portfolio'));
   Plotly.react('cr',     crSeries(data),            crLayout(data));
-  Plotly.react('fees',   feesSeries(data),          layout('Accumulated swap fee cost paid on DLV rebalances', 'USDC', '% of position'));
+  Plotly.react('fees',   feesSeries(data),          layout(\`Accumulated swap fee cost paid on DLV rebalances\`, PAYLOAD.stableSymbol, '% of position'));
   Plotly.react('swapFeesCollected', swapFeesCollectedSeries(data), layout('Swap fees collected', 'USD', '% of position'));
-  Plotly.react('realizedIL', realizedILSeries(data), layout('Impermanent Loss vs BTC Hold Strategy', 'IL %', 'USDC'));
-  Plotly.react('portfolio', portfolioValueSeries(data), layout('Portfolio value breakdown', 'Value (USDC)'));
+  Plotly.react('realizedIL', realizedILSeries(data), layout(\`Impermanent Loss vs \${PAYLOAD.volatileSymbol} Hold Strategy\`, 'IL %', PAYLOAD.stableSymbol));
+  Plotly.react('portfolio', portfolioValueSeries(data), layout(\`Portfolio value breakdown\`, \`Value (\${PAYLOAD.stableSymbol})\`));
   Plotly.react('crchange', crChangeSeries(data),    layout('Collateral ratio change per rebalance', 'Change (percentage points)'));
-  Plotly.react('widths', rangeWidthSeries(data),    layout('Position range widths (could be dynamically changed)', 'Price width (USDC)'));
+  Plotly.react('widths', rangeWidthSeries(data),    layout('Position range widths (could be dynamically changed)', 'Tick width'));
 
   // Update KPI displays
   document.getElementById('points').textContent = \`\${data.length.toLocaleString()} points\`;
@@ -545,7 +606,9 @@ async function main() {
       week: aggregate(parsedAll, "week"),
       month: aggregate(parsedAll, "month"),
       a0: CONFIG.asset0Symbol,
-      a1: CONFIG.asset1Symbol
+      a1: CONFIG.asset1Symbol,
+      volatileSymbol: CONFIG.volatileSymbol,
+      stableSymbol: CONFIG.stableSymbol
     };
 
     const html = htmlTemplate(payload);

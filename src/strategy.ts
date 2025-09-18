@@ -20,6 +20,7 @@ import {
   Rebalance,
   CommonVariables,
 } from "./enums";
+import { getCurrentPoolConfig } from "./pool-config";
 import { formatInTimeZone } from 'date-fns-tz';
 import { LiquidityEvent } from "@bella-defintech/uniswap-v3-simulator/dist/entity/LiquidityEvent";
 import { SwapEvent } from "@bella-defintech/uniswap-v3-simulator/dist/entity/SwapEvent";
@@ -50,7 +51,7 @@ export interface Strategy {
     variable: Map<string, any>
   ) => Promise<void>;
   evaluate: (corePoolView: CorePoolView, variable: Map<string, any>, vault: AlphaProVault) => void;
-  backtest: (startDate: Date, endDate: Date, lookupPeriod: LookUpPeriod, initialToken0Amount: JSBI, initialToken1Amount: JSBI) => Promise<void>;
+  backtest: (startDate: Date, endDate: Date, lookupPeriod: LookUpPeriod) => Promise<void>;
   run: (dryrun: boolean) => Promise<void>;
   shutdown: () => Promise<void>;
 }
@@ -89,7 +90,7 @@ export async function buildStrategy(
       swap, collect). If the user choose to trigger it, we run the act callback 
       then repeat the steps above until the endDate comes.
     */
-  async function backtest(startDate: Date, endDate: Date, lookupPeriod: LookUpPeriod, initialToken0Amount: JSBI, initialToken1Amount: JSBI): Promise<void> {
+  async function backtest(startDate: Date, endDate: Date, lookupPeriod: LookUpPeriod): Promise<void> {
     const fmtUTC = (d: Date) => formatInTimeZone(d, 'UTC', 'yyyy-MM-dd HH:mm:ss');
 
     // initial environment
@@ -128,7 +129,8 @@ export async function buildStrategy(
 
     // 1. Instantiate a SimulationDataManager
     // this is for handling the internal data (snapshots, roadmaps, etc.)
-    let simulationDataManager: SimulationDataManager = await SQLiteSimulationDataManager.buildInstance();
+    const currentPoolConfig = getCurrentPoolConfig();
+    let simulationDataManager: SimulationDataManager = await SQLiteSimulationDataManager.buildInstance(currentPoolConfig.getDbPath());
     let clientInstance: SimulatorClient = new SimulatorClient(simulationDataManager);
     let poolConfig = await eventDB.getPoolConfig();
     // 4. Build a simulated CorePool instance from the downloaded-and-pre-processed mainnet events
@@ -136,33 +138,50 @@ export async function buildStrategy(
     let sqrtPriceX96ForInitialization = await eventDB.getInitialSqrtPriceX96();
     await configurableCorePool.initialize(sqrtPriceX96ForInitialization);
 
-    let account: Account = await buildAccount(toBN(initialToken0Amount), toBN(initialToken1Amount), configurableCorePool.getCorePool())
+    let account: Account = await buildAccount(configurableCorePool.getCorePool())
 
     // This is an implementation of Engine interface based on the Tuner.
     let engine = await buildDryRunEngine(account, configurableCorePool);
 
     // First vault deposit to which we compare strategy performance
-    await initializeAccountVault(account, initialToken0Amount, engine);
+    await initializeAccountVault(account, engine);
 
     async function replayEvent(
       event: LiquidityEvent | SwapEvent
     ): Promise<void> {
       switch (event.type) {
         case EventType.MINT:
-          await configurableCorePool.mint(
-            event.recipient,
-            event.tickLower,
-            event.tickUpper,
-            event.liquidity
-          );
+          try {
+            await configurableCorePool.mint(
+              event.recipient,
+              event.tickLower,
+              event.tickUpper,
+              event.liquidity
+            );
+          } catch (mintError: any) { 
+            console.warn(`Warning: Mint operation failed for position [${event.tickLower}, ${event.tickUpper}] with liquidity ${event.liquidity.toString()}:`, mintError.message);
+            // Continue simulation even if individual mint fails
+          }
           break;
         case EventType.BURN:
-          await configurableCorePool.burn(
-            event.msgSender,
-            event.tickLower,
-            event.tickUpper,
-            event.liquidity
-          );
+          try {
+            await configurableCorePool.burn(
+              event.msgSender,
+              event.tickLower,
+              event.tickUpper,
+              event.liquidity
+            );
+          } catch (burnError: any) {
+            // Handle liquidity burn errors gracefully
+            if (burnError.message?.includes('NP') || burnError.message?.includes('Not Positive')) {
+              console.warn(`Warning: Cannot burn ${event.liquidity.toString()} liquidity from position [${event.tickLower}, ${event.tickUpper}] for ${event.msgSender}. Position may have insufficient liquidity. Skipping event.`);
+              // Skip this burn event and continue with simulation
+            } else {
+              // Re-throw other errors
+              console.error('Burn operation failed:', burnError);
+              throw burnError;
+            }
+          }
           break;
         case EventType.SWAP:
             {
@@ -183,8 +202,7 @@ export async function buildStrategy(
                     // Some historical events cannot be perfectly resolved (e.g. combined internal ops or rounding differences).
                     // Fall back to a best-effort amount so the simulation can continue. This may introduce tiny
                     // parity differences (handled by a relaxed tolerance on post-rebalance checks).
-                    const _re: any = resolveErr;
-                    // console.warn('resolveInputFromSwapResultEvent failed, falling back to best-effort amountSpecified:', _re?.message ?? _re);
+                    // console.warn('resolveInputFromSwapResultEvent failed, falling back to best-effort amountSpecified:', resolveErr?.message ?? resolveErr);
                     amountSpecified = zeroForOne ? event.amount0 : event.amount1;
                     sqrtPriceLimitX96 = undefined;
                     // console.log('fallback swap input:', amountSpecified.toString());
@@ -204,7 +222,7 @@ export async function buildStrategy(
                   // console.warn('querySwap failed:', _qe?.message ?? _qe);
                 }
 
-                const res = await configurableCorePool.swap(zeroForOne, amountSpecified, sqrtPriceLimitX96);
+                await configurableCorePool.swap(zeroForOne, amountSpecified, sqrtPriceLimitX96);
                 // const returnedSqrt = (res as any).sqrtPriceX96 ? (res as any).sqrtPriceX96.toString() : configurableCorePool.getCorePool().sqrtPriceX96.toString();
               } catch (err) {
                 console.error('swap/pipeline error:', err);
