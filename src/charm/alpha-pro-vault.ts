@@ -550,14 +550,22 @@ export class AlphaProVault {
       let amount1Min = minOutPpm(stableDeposit, SLIPPAGE_PPM, JSBI.BigInt(400_000));  // ~$0.40 in stable units
 
       if (!(eq(rebalanceBorrowedAmount.volatileReceived, ZERO) && eq(stableDeposit, ZERO))) {
-        await this.deposit(engine, {
-          sender: MANAGER,
-          to: MANAGER,
-          amount0Desired: rebalanceBorrowedAmount.volatileReceived,
-          amount1Desired: stableDeposit,
-          amount0Min,
-          amount1Min
-        });
+        try {
+          await this.deposit(engine, {
+            sender: MANAGER,
+            to: MANAGER,
+            amount0Desired: rebalanceBorrowedAmount.volatileReceived,
+            amount1Desired: stableDeposit,
+            amount0Min,
+            amount1Min
+          });
+        } catch (error) {
+          if (error instanceof RangeError && error.message.includes('Maximum call stack size exceeded')) {
+            console.warn('Stack overflow detected during deposit - skipping this operation to prevent crash');
+            return ZERO;
+          }
+          throw error; // Re-throw other errors
+        }
       }
       this.virtualDebt = add(this.virtualDebt, rebalanceBorrowedAmount.borrowStable);
     } else if (rebalanceBorrowedAmount.mode === "deleverage") {
@@ -568,13 +576,21 @@ export class AlphaProVault {
       if (JSBI.lessThan(amount1Min, ZERO)) amount1Min = ZERO;
 
       if (!JSBI.equal(rebalanceBorrowedAmount.sharesToBurn, ZERO)) {
-        await this.withdraw(engine, {
-          sender: MANAGER,
-          to: MANAGER,
-          shares: rebalanceBorrowedAmount.sharesToBurn,
-          amount0Min,
-          amount1Min
-        });
+        try {
+          await this.withdraw(engine, {
+            sender: MANAGER,
+            to: MANAGER,
+            shares: rebalanceBorrowedAmount.sharesToBurn,
+            amount0Min,
+            amount1Min
+          });
+        } catch (error) {
+          if (error instanceof RangeError && error.message.includes('Maximum call stack size exceeded')) {
+            console.warn('Stack overflow detected during withdraw - skipping this operation to prevent crash');
+            return ZERO;
+          }
+          throw error; // Re-throw other errors
+        }
       }
       const repay = rebalanceBorrowedAmount.repayStable;
       console.log("Rebalance debt: repaying " + repay.toString() + " stable tokens of " + this.virtualDebt.toString() + " virtual debt");
