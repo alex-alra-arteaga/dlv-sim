@@ -895,11 +895,6 @@ priceAtTickWad(tick: number): JSBI {
   return this.poolPrice(sqrtAtTick);
 }
 
-// Optional convenience: convert WAD => number
-private _wadToNum(x: JSBI): number {
-  return Number(x.toString()) / 1e18;
-}
-
 // Humanized stable per volatile (WAD) - applies decimal scaling
 priceStablePerVolatileWad(sqrtPriceX96: JSBI): JSBI {
   // poolPrice already returns the correct price in WAD format
@@ -1151,12 +1146,6 @@ async getPositionPriceRanges() {
 
       // closed-form target W (value to withdraw)
       const W = ceilDiv(FullMath.mulDiv(deficit, WAD, JSBI.BigInt(1)), denomDelWAD); // = deficit / (1 - 2f/(R+1))
-
-      // can we actually hit target? (W ≤ V0)
-      const canHitTarget =
-        JSBI.lessThanOrEqual(W, V0) // equivalent to deficit ≤ V0 * denomDelWAD / WAD
-        // (robust version avoids recomputation):
-        || JSBI.lessThanOrEqual(deficit, FullMath.mulDiv(V0, denomDelWAD, WAD));
 
       // ---- CAP to feasible amounts
       const Wcap = JSBI.lessThanOrEqual(W, V0) ? W : V0;

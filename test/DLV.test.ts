@@ -3,18 +3,15 @@ import {
   CorePoolView,
   EventDBManager,
   getDate,
-  mul10pow,
-  get10pow,
-  toJSBI,
 } from "@bella-defintech/uniswap-v3-simulator";
-import { mul, safeToBN } from "../src/utils";
+import { safeToBN } from "../src/utils";
 import { BigNumber as BN } from "ethers";
-import { buildStrategy, CommonVariables, Phase, Rebalance } from "../src/strategy.ts";
-import { Engine } from "../src/engine.ts";
-import { MaxUint128, TARGET_CR, ZERO } from "../src/internal_constants.ts";
-import { LogDBManager } from "./LogDBManager.ts";
-import { charmConfig, dlvConfig, configLookUpPeriod } from "../config.ts";
-import { AlphaProVault } from "../src/charm/alpha-pro-vault.ts";
+import { buildStrategy, CommonVariables, Phase, Rebalance } from "../src/strategy";
+import { Engine } from "../src/engine";
+import { MaxUint128, TARGET_CR } from "../src/internal_constants";
+import { LogDBManager } from "./LogDBManager";
+import { charmConfig, dlvConfig, configLookUpPeriod } from "../config";
+import { AlphaProVault } from "../src/charm/alpha-pro-vault";
 import { getCurrentPoolConfig } from "../src/pool-config";
 
 export interface RebalanceLog {
@@ -150,7 +147,6 @@ describe("DLV Strategy", function () {
 
     let cache = function (
       phase: Phase,
-      corePoolView: CorePoolView,
       variable: Map<string, any>
     ) {
       switch (phase) {
@@ -352,7 +348,6 @@ const act = async function (
 };
 
     let evaluate = async function (
-      corePoolView: CorePoolView,
       variable: Map<string, any>,
       vault: AlphaProVault
     ) {

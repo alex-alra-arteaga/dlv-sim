@@ -37,7 +37,7 @@ for (let i = 0; i < argv.length; i++) {
 const LEVEL: Level = (args.level ?? "standard") as Level;
 const TICK_SPACING = Number(args.tickSpacing ?? 60);
 const POOL_FEE_TIER = Number(args.feeTierBps ?? 30); // just metadata for report
-const SEED = String(args.seed ?? "42");
+// const SEED = String(args.seed ?? "42");
 const RUNS_CAP = Number(args.runs ?? 0); // 0 = no cap
 const PROJECT_ROOT = process.cwd();
 const RESULTS_PATH = path.join(PROJECT_ROOT, "brute-force-results.jsonl");

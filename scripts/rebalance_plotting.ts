@@ -625,7 +625,6 @@ async function main() {
 
 function openInBrowser(filePath: string) {
   const abs = path.resolve(filePath);
-  const url = `file://${abs}`;
   const platform = process.platform;
   let cmd: string, args: string[];
 
