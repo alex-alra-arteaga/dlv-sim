@@ -55,9 +55,5 @@ yarn run update
 At the end, move the database file from the source to the `data` folder.
 
 # Future features
-Not in any particular order
 
 - Borrow Interest
-- Show on the plotting when DLV and ALM rebalances happen
-- Show volume fees captured
-- IL realized between ALM rebalances

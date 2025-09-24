@@ -146,4 +146,5 @@ mochawesome-report/
 
 # custom
 *.db
-rebalance_dashboard.html
+*.html
+*.jsonl

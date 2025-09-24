@@ -42,6 +42,28 @@ export interface RebalanceLog {
   date: Date;
 }
 
+// APY calculation function
+function calculateAPY(data: Array<{t: number, vaultValue: number, price: number}>) {
+  if (!data.length || data.length < 2) return { vault: 0, hold: 0, diff: 0 };
+  
+  const first = data[0];
+  const last = data[data.length - 1];
+  const daysDiff = (last.t - first.t) / (1000 * 60 * 60 * 24);
+  
+  if (daysDiff <= 0) return { vault: 0, hold: 0, diff: 0 };
+  
+  // Calculate returns
+  const vaultReturn = (last.vaultValue / first.vaultValue) - 1;
+  const holdReturn = ((last.price * 0.01) / (first.price * 0.01)) - 1;
+  
+  // Annualize (compound)
+  const vaultAPY = (Math.pow(1 + vaultReturn, 365 / daysDiff) - 1) * 100;
+  const holdAPY = (Math.pow(1 + holdReturn, 365 / daysDiff) - 1) * 100;
+  const diffAPY = vaultAPY - holdAPY;
+  
+  return { vault: vaultAPY, hold: holdAPY, diff: diffAPY };
+}
+
 describe("DLV Strategy", function () {
   let poolConfig: any;
   let eventDBManagerPath: string;
@@ -68,6 +90,9 @@ describe("DLV Strategy", function () {
     const DLV_CALLS  = "dlvCalls";
     const ALM_CALLS  = "almCalls";
     
+    // Array to collect data points for APY calculation
+    const rebalanceLog: Array<{t: number, vaultValue: number, price: number}> = [];
+    
     // IL tracking variables - track values between consecutive periods
     let previousAfterTotalPoolValue: JSBI | null = null; // <-- GAV at end of previous interval
     let previousTotalAmounts: { total0: JSBI; total1: JSBI } | null = null;
@@ -89,6 +114,11 @@ describe("DLV Strategy", function () {
 
     let startDate = getDate(2021, 5, 6);
     let endDate = getDate(2024, 12, 15);
+
+    // // For brute-force testing, use shorter period to speed up execution
+    // if (process.env.BRUTE_FORCE === 'true') {
+    //   endDate = getDate(2021, 12, 6); // Use only ~3 months for brute-force
+    // }
 
     let trigger = async function (
       phase: Phase,
@@ -302,6 +332,13 @@ const act = async function (
 
       await logDB.persistRebalanceLog(newLog);
 
+      // Collect data point for APY calculation
+      rebalanceLog.push({
+        t: date.getTime(),
+        vaultValue: Number(currentTotalValueUSDC.toString()) / 1e6, // Scale to match rebalance_plotting.ts
+        price: Number(currPrice.toString()) / 1e18 // Scale to match rebalance_plotting.ts
+      });
+
       // ---------- UPDATE SNAPSHOTS FOR NEXT PERIOD ----------
       previousAfterTotalPoolValue = currentTotalValueUSDC; // NAV end-of-period
       previousTotalAmounts = totalAmounts;                 // amounts end-of-period
@@ -313,9 +350,6 @@ const act = async function (
       break;
   }
 };
-
-
-
 
     let evaluate = async function (
       corePoolView: CorePoolView,
@@ -344,6 +378,10 @@ const act = async function (
     
       const virtualDebt = vault.virtualDebt;
       console.log("virtual debt (USDC):", virtualDebt.toString());
+
+      // Calculate and print APY in format expected by brute-force.ts
+      const apy = calculateAPY(rebalanceLog);
+      console.log(`RESULT_JSON: ${JSON.stringify(apy)}`);
     };
 
     // Make sure the DB has been initialized, and see scripts/EventsDownloaders
@@ -357,7 +395,22 @@ const act = async function (
       evaluate
     );
 
-    await strategy.backtest(startDate, endDate, configLookUpPeriod);
+    try {
+      await strategy.backtest(startDate, endDate, configLookUpPeriod);
+    } catch (error) {
+      console.error("[BACKTEST ERROR]", error);
+      if (process.env.BRUTE_FORCE === 'true') {
+        // For brute-force, still call evaluate with current state
+        console.log("[BRUTE-FORCE] Backtest failed, calling evaluate with partial results");
+        // We need to get the current state somehow, but this is tricky
+        // For now, just print a failed result
+        console.log(`RESULT_JSON: ${JSON.stringify({ vault: 0, hold: 0, diff: 0, error: true })}`);
+        await strategy.shutdown();
+        return;
+      } else {
+        throw error;
+      }
+    }
 
     await strategy.shutdown();
   });

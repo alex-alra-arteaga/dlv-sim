@@ -10,7 +10,13 @@
     "download": "npx tsx scripts/events_downloader.ts",
     "update": "npx tsx scripts/events_updater.ts",
     "postinstall": "patch-package",
-    "dashboard": "npx tsx scripts/rebalance_plotting.ts"
+    "dashboard": "npx tsx scripts/rebalance_plotting.ts",
+    "brute-force": "npx tsx scripts/brute-force.ts && npx tsx scripts/plot-brute-force.ts",
+    "brute-force:air": "npx tsx scripts/brute-force.ts --level air --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts",
+    "brute-force:light": "npx tsx scripts/brute-force.ts --level light --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts",
+    "brute-force:standard": "npx tsx scripts/brute-force.ts --level standard --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts",
+    "brute-force:heavy": "npx tsx scripts/brute-force.ts --level heavy --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts",
+    "brute-force:extreme": "npx tsx scripts/brute-force.ts --level extreme --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts"
   },
   "keywords": [],
   "author": "",

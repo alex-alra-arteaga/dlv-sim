@@ -1,7 +1,7 @@
 import { BigNumber as BN } from "ethers";
 import { AlphaProVault } from "./charm/alpha-pro-vault";
 import { JSBI } from "./charm/types";
-import { charmConfig } from "../config";
+import { charmConfig, managerFee } from "../config";
 import { CorePoolView } from "@bella-defintech/uniswap-v3-simulator";
 import { Engine } from "./engine";
 import { MANAGER } from "./internal_constants";
@@ -26,7 +26,7 @@ export async function buildAccount(
   corePoolView: CorePoolView
 ): Promise<Account> {
   const vaultAddress = '0x2146520cA9FaBB6ad227d0e8BCe2bF18Fd742BAB'; // Random
-  const vault = new AlphaProVault(charmConfig, corePoolView, vaultAddress);
+  const vault = new AlphaProVault(charmConfig, corePoolView, vaultAddress, managerFee, 0);
 
   return {
     token0: BN.from(0),
