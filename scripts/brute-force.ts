@@ -41,8 +41,20 @@ const SEED = String(args.seed ?? "42");
 const RUNS_CAP = Number(args.runs ?? 0); // 0 = no cap
 const PROJECT_ROOT = process.cwd();
 const RESULTS_PATH = path.join(PROJECT_ROOT, "brute-force-results.jsonl");
+const HEAP_MB = Number(args.heapMB ?? 2048);        // per-child V8 heap cap (MB)
+const REPORTER = String(args.reporter ?? "min");    // mocha reporter
 
 // ---- helpers ----
+function getAvailMemMB() {
+  // Prefer Linux MemAvailable; fallback to os.freemem()
+  try {
+    const s = fs.readFileSync("/proc/meminfo", "utf8");
+    const m = s.match(/^MemAvailable:\s+(\d+)\s+kB/m);
+    if (m) return Math.floor(Number(m[1]) / 1024);
+  } catch {}
+  return Math.floor(os.freemem() / (1024 * 1024));
+}
+function clamp(n:number, lo:number, hi:number){ return Math.max(lo, Math.min(hi, n)); }
 function alignTick(n: number, spacing: number) {
   const q = Math.round(n / spacing);
   return q * spacing;
@@ -226,10 +238,12 @@ function runOnce(charm: Charm, dlv: DLV): Promise<{ ok: boolean; apy?: any; stdo
   const mochaCmd = [
     "node",
     "--import=tsx",
-    "--max-old-space-size=18192",
+    `--max-old-space-size=${HEAP_MB}`,
     "--expose-gc",
     "./node_modules/mocha/bin/mocha",
     "--extension", "ts",
+    "--reporter", REPORTER,
+    "--timeout", "0"
   ];
   console.log(`[BRUTE-FORCE] Running mocha command: ${mochaCmd.join(' ')}`);
 
@@ -320,8 +334,8 @@ function runOnce(charm: Charm, dlv: DLV): Promise<{ ok: boolean; apy?: any; stdo
 
   console.log(`Brute-force level=${LEVEL}, tickSpacing=${TICK_SPACING}, feeTier=${POOL_FEE_TIER}bps, combos=${combos.length}, toRun=${indices.length}`);
 
-  // header for results
-  fs.writeFileSync(RESULTS_PATH, "", "utf8");
+  // results writer (single stream, avoids appendFileSync contention)
+  const resultsWS = fs.createWriteStream(RESULTS_PATH, { flags: "w" });
 
   let runCount = 0;
   let successCount = 0;
@@ -330,7 +344,14 @@ function runOnce(charm: Charm, dlv: DLV): Promise<{ ok: boolean; apy?: any; stdo
   let totalDiffAPY = 0;
 
   // Concurrency settings
-  const defaultConc = Math.max(1, Math.min(4, os.cpus().length - 1));
+  const vcpus = os.cpus().length;
+  // crude SMT heuristic: x86 usually SMT=2; arm64 often 1 (Graviton)
+  const smt = process.arch === "x64" ? 2 : 1;
+  const physCores = Math.max(1, Math.floor(vcpus / smt));
+  const availMB = getAvailMemMB();
+  const perChildMB = HEAP_MB + 512; // heap + overhead fudge
+  const maxByMem = Math.max(1, Math.floor((availMB * 0.80) / perChildMB));
+  const defaultConc = clamp(Math.min(physCores, maxByMem), 1, vcpus - 1);
   const CONCURRENCY = Number(args.concurrency ?? defaultConc);
   console.log(`[BRUTE-FORCE] Using concurrency=${CONCURRENCY}`);
 
@@ -366,13 +387,14 @@ function runOnce(charm: Charm, dlv: DLV): Promise<{ ok: boolean; apy?: any; stdo
         console.log(`[BRUTE-FORCE FAILED] [W${wid}] Run: ${key} (${ms}ms)`);
       }
 
-      fs.appendFileSync(RESULTS_PATH, JSON.stringify(row) + "\n", "utf8");
+      resultsWS.write(JSON.stringify(row) + "\n");
       runCount++;
     }
   }
 
   const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
   await Promise.all(workers);
+  await new Promise<void>((res) => resultsWS.end(res));
 
   // Summary statistics
   const avgVaultAPY = successCount > 0 ? totalVaultAPY / successCount : 0;
