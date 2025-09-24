@@ -18,12 +18,13 @@
 
     "dashboard": "npx tsx scripts/rebalance_plotting.ts",
 
-    "brute-force": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 && node dist/scripts/plot-brute-force.js",
-    "brute-force:standard": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level standard --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js",
-    "brute-force:air":     "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level air --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js",
-    "brute-force:light":   "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level light --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js",
-    "brute-force:heavy":   "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level heavy --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js",
-    "brute-force:extreme": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level extreme --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js"
+    "brute-force": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist && node dist/scripts/plot-brute-force.js",
+
+    "brute-force:air":      "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level air --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
+    "brute-force:light":    "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level light --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
+    "brute-force:standard": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level standard --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
+    "brute-force:heavy":    "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level heavy --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
+    "brute-force:extreme":  "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level extreme --tickSpacing 60 && node dist/scripts/plot-brute-force.js"
   },
   "keywords": [],
   "author": "",
