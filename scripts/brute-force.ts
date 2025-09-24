@@ -243,11 +243,13 @@ const mochaCmd = PREBUILT
       `--max-old-space-size=${HEAP_MB}`,
       "--expose-gc",
       "./node_modules/mocha/bin/mocha",
+      "--no-config",
+      "--no-package",
       "--extension", "js",
       "--recursive",
       "--reporter", REPORTER,
       "--timeout", "0",
-      `${BUILD_DIR}/test`
+      "--spec", `${BUILD_DIR}/test/**/*.js`
     ]
   : [
       "node",
