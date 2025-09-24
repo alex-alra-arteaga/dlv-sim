@@ -5,18 +5,26 @@
   "main": "main.js",
   "scripts": {
     "test": "node --import=tsx --max-old-space-size=18192 --expose-gc ./node_modules/mocha/bin/mocha --extension ts",
+
     "simulate": "yarn test && yarn dashboard",
+
     "build": "esbuild src/main.ts --bundle --outfile=dist/main.js --minify --format=esm",
+    "build:scripts": "tsc -p tsconfig.scripts.json",
+
     "download": "npx tsx scripts/events_downloader.ts",
     "update": "npx tsx scripts/events_updater.ts",
+
     "postinstall": "patch-package",
+
     "dashboard": "npx tsx scripts/rebalance_plotting.ts",
-    "brute-force": "npx tsx scripts/brute-force.ts && npx tsx scripts/plot-brute-force.ts",
-    "brute-force:air": "npx tsx scripts/brute-force.ts --level air --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts",
-    "brute-force:light": "npx tsx scripts/brute-force.ts --level light --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts",
-    "brute-force:standard": "npx tsx scripts/brute-force.ts --level standard --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts",
-    "brute-force:heavy": "npx tsx scripts/brute-force.ts --level heavy --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts",
-    "brute-force:extreme": "npx tsx scripts/brute-force.ts --level extreme --tickSpacing 60 --runs 0 && npx tsx scripts/plot-brute-force.ts"
+
+    "brute-force": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 && node dist/scripts/plot-brute-force.js",
+
+    "brute-force:air": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level air --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js",
+    "brute-force:light": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level light --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js",
+    "brute-force:standard": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level standard --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js",
+    "brute-force:heavy": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level heavy --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js",
+    "brute-force:extreme": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --heapMB 2048 --concurrency 32 --level extreme --tickSpacing 60 --runs 0 && node dist/scripts/plot-brute-force.js"
   },
   "keywords": [],
   "author": "",

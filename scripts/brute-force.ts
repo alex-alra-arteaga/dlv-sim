@@ -235,16 +235,30 @@ function runOnce(charm: Charm, dlv: DLV): Promise<{ ok: boolean; apy?: any; stdo
   console.log(`[BRUTE-FORCE] Starting run with charm config:`, JSON.stringify(charm));
   console.log(`[BRUTE-FORCE] DLV config:`, JSON.stringify(dlv));
 
-  const mochaCmd = [
-    "node",
-    "--import=tsx",
-    `--max-old-space-size=${HEAP_MB}`,
-    "--expose-gc",
-    "./node_modules/mocha/bin/mocha",
-    "--extension", "ts",
-    "--reporter", REPORTER,
-    "--timeout", "0"
-  ];
+const PREBUILT = args.prebuilt === true || String(args.prebuilt || "").toLowerCase() === "true";
+const BUILD_DIR = String(args.buildDir ?? "dist");
+const mochaCmd = PREBUILT
+  ? [
+      "node",
+      `--max-old-space-size=${HEAP_MB}`,
+      "--expose-gc",
+      "./node_modules/mocha/bin/mocha",
+      "--extension", "js",
+      "--recursive",
+      "--reporter", REPORTER,
+      "--timeout", "0",
+      `${BUILD_DIR}/test`
+    ]
+  : [
+      "node",
+      "--import=tsx",
+      `--max-old-space-size=${HEAP_MB}`,
+      "--expose-gc",
+      "./node_modules/mocha/bin/mocha",
+      "--extension", "ts",
+      "--reporter", REPORTER,
+      "--timeout", "0"
+    ];
   console.log(`[BRUTE-FORCE] Running mocha command: ${mochaCmd.join(' ')}`);
 
   const env = {
