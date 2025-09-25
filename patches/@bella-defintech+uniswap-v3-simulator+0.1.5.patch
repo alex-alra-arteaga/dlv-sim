@@ -1,73 +1,35 @@
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
-index 2e87b12..8dbf5dc 100644
+index 2e87b12..f8cfaef 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
-@@ -37,11 +37,18 @@ class MainnetDataDownloader {
-         // BTW, for most cases, it's the same as Initialization event block number. Let's take this now.
+@@ -38,10 +38,19 @@ class MainnetDataDownloader {
          return this.queryInitializationBlockNumber(poolAddress);
      }
--    async queryInitializationBlockNumber(poolAddress) {
--        let uniswapV3Pool = await this.getCorePoolContarct(poolAddress);
+     async queryInitializationBlockNumber(poolAddress) {
++        // Patched: scan logs in batches to avoid provider range limits
++        const batchSize = 5000;
+         let uniswapV3Pool = await this.getCorePoolContarct(poolAddress);
 -        let initializeTopic = uniswapV3Pool.filters.Initialize();
 -        let initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic);
 -        return initializationEvent[0].blockNumber;
-+    async queryInitializationBlockNumber(poolAddress, batchSize = 5000) {
-+      const pool = await this.getCorePoolContarct(poolAddress);
-+      const topic = pool.filters.Initialize();
-+      const latest = await this.RPCProvider.getBlockNumber();
-+
-+      for (let from = 0; from <= latest; from += (batchSize + 1)) {
-+        console.log(`Searching for Initialize event from block ${from} to ${Math.min(from + batchSize, latest)}`);
-+        const to = Math.min(from + batchSize, latest);
-+        const logs = await pool.queryFilter(topic, from, to);
-+        if (logs.length) return logs[0].blockNumber;
-+      }
-+      throw new Error("Initialize event not found");
++        const initializeTopic = uniswapV3Pool.filters.Initialize();
++        const latest = await this.RPCProvider.getBlockNumber();
++        for (let from = 0; from <= latest; from += (batchSize + 1)) {
++            const to = Math.min(from + batchSize, latest);
++            const logs = await uniswapV3Pool.queryFilter(initializeTopic, from, to);
++            if (logs && logs.length > 0) {
++                return logs[0].blockNumber;
++            }
++        }
++        throw new Error("Initialize event not found");
      }
      async parseEndBlockTypeWhenInit(toBlock, poolAddress) {
          switch (toBlock) {
-diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
-index 02b6bb1..1dba0ca 100644
---- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
-+++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
-@@ -2,3 +2,6 @@ export declare function getDate(year: number, month: number, day: number, hour?:
- export declare function getYesterday(date: Date): Date;
- export declare function getTomorrow(date: Date): Date;
- export declare function format(date: Date, fmt: string): string;
-+export declare function getNextHour(date: Date): Date;
-+export declare function getNextMinute(date: Date): Date;
-+export declare function getNext4Hour(date: Date): Date;
-\ No newline at end of file
-diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
-index a7c3999..e48a1ac 100644
---- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
-+++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
-@@ -15,6 +15,18 @@ exports.getYesterday = getYesterday;
- function getTomorrow(date) {
-     return new Date(date.getTime() + 24 * 60 * 60 * 1000);
- }
-+function getNextHour(date) {
-+    return new Date(date.getTime() + 60 * 60 * 1000);
-+}
-+exports.getNextHour = getNextHour;
-+function getNext4Hour(date) {
-+    return new Date(date.getTime() + 4 * 60 * 60 * 1000);
-+}
-+exports.getNext4Hour = getNext4Hour;
-+function getNextMinute(date) {
-+    return new Date(date.getTime() + 60 * 1000);
-+}
-+exports.getNextMinute = getNextMinute;
- exports.getTomorrow = getTomorrow;
- function format(date, fmt) {
-     var o = {
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
-index 4f88688..e6a5c04 100644
+index f6e4bfb..417fe8d 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
-@@ -200,22 +200,30 @@ class EventDBManager {
-     }
-     queryLiquidityEventsByDate(type, startDate, endDate, trx) {
+@@ -201,23 +201,35 @@ class EventDBManager {
          return this.getBuilderContext("liquidity_events", trx)
              .where("type", type)
              .andWhere("date", ">=", startDate)
@@ -107,5 +69,45 @@ index 4f88688..e6a5c04 100644
      }
      insertPoolConfig(poolConfig, trx) {
          return this.getBuilderContext("pool_config", trx).insert([
-             {
-                 pool_config_id: poolConfig.id,
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
+index 02b6bb1..067101d 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
+@@ -2,3 +2,6 @@ export declare function getDate(year: number, month: number, day: number, hour?:
+ export declare function getYesterday(date: Date): Date;
+ export declare function getTomorrow(date: Date): Date;
+ export declare function format(date: Date, fmt: string): string;
++export declare function getNextHour(date: Date): Date;
++export declare function getNextMinute(date: Date): Date;
++export declare function getNext4Hour(date: Date): Date;
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
+index a7c3999..b7a371f 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
+@@ -1,6 +1,6 @@
+ "use strict";
+ Object.defineProperty(exports, "__esModule", { value: true });
+-exports.format = exports.getTomorrow = exports.getYesterday = exports.getDate = void 0;
++exports.format = exports.getNextMinute = exports.getNext4Hour = exports.getNextHour = exports.getTomorrow = exports.getYesterday = exports.getDate = void 0;
+ function getDate(year, month, day, hour = 0, minute = 0, second = 0, millisecond = 0) {
+     let date = new Date();
+     date.setFullYear(year, month - 1, day);
+@@ -16,6 +16,18 @@ function getTomorrow(date) {
+     return new Date(date.getTime() + 24 * 60 * 60 * 1000);
+ }
+ exports.getTomorrow = getTomorrow;
++function getNextHour(date) {
++    return new Date(date.getTime() + 60 * 60 * 1000);
++}
++exports.getNextHour = getNextHour;
++function getNext4Hour(date) {
++    return new Date(date.getTime() + 4 * 60 * 60 * 1000);
++}
++exports.getNext4Hour = getNext4Hour;
++function getNextMinute(date) {
++    return new Date(date.getTime() + 60 * 1000);
++}
++exports.getNextMinute = getNextMinute;
+ function format(date, fmt) {
+     var o = {
+         "M+": date.getMonth() + 1,

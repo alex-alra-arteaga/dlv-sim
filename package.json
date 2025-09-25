@@ -5,26 +5,19 @@
   "main": "main.js",
   "scripts": {
     "test": "node --import=tsx --max-old-space-size=18192 --expose-gc ./node_modules/mocha/bin/mocha --extension ts",
-
     "simulate": "yarn test && yarn dashboard",
-
     "build": "esbuild src/main.ts --bundle --outfile=dist/main.js --minify --format=esm",
     "build:scripts": "tsc -p tsconfig.scripts.json && node scripts/helper/postbuild-cjs.cjs",
-
     "download": "npx tsx scripts/events_downloader.ts",
     "update": "npx tsx scripts/events_updater.ts",
-
     "postinstall": "patch-package",
-
     "dashboard": "npx tsx scripts/rebalance_plotting.ts",
-
     "brute-force": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist && node dist/scripts/plot-brute-force.js",
-
-    "brute-force:air":      "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level air --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
-    "brute-force:light":    "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level light --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
+    "brute-force:air": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level air --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
+    "brute-force:light": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level light --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
     "brute-force:standard": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level standard --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
-    "brute-force:heavy":    "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level heavy --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
-    "brute-force:extreme":  "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level extreme --tickSpacing 60 && node dist/scripts/plot-brute-force.js"
+    "brute-force:heavy": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level heavy --tickSpacing 60 && node dist/scripts/plot-brute-force.js",
+    "brute-force:extreme": "yarn build:scripts && node dist/scripts/brute-force.js --prebuilt --buildDir dist --level extreme --tickSpacing 60 && node dist/scripts/plot-brute-force.js"
   },
   "keywords": [],
   "author": "",
@@ -48,7 +41,7 @@
   },
   "type": "module",
   "dependencies": {
-    "@bella-defintech/uniswap-v3-simulator": "^0.1.5",
+    "@bella-defintech/uniswap-v3-simulator": "0.1.5",
     "date-fns": "^2.30.0",
     "date-fns-tz": "^2.0.0",
     "dayjs": "^1.11.11",
