@@ -61,3 +61,51 @@ index a7c3999..e48a1ac 100644
  exports.getTomorrow = getTomorrow;
  function format(date, fmt) {
      var o = {
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
+index 4f88688..e6a5c04 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
+@@ -200,22 +200,30 @@ class EventDBManager {
+     }
+     queryLiquidityEventsByDate(type, startDate, endDate, trx) {
+         return this.getBuilderContext("liquidity_events", trx)
+             .where("type", type)
+             .andWhere("date", ">=", startDate)
+-            .andWhere("date", "<", endDate);
++            .andWhere("date", "<", endDate)
++            .orderBy("block_number")
++            .orderBy("transaction_index")
++            .orderBy("log_index");
+     }
+     querySwapEventsByDate(startDate, endDate, trx) {
+         return this.getBuilderContext("swap_events", trx)
+             .andWhere("date", ">=", startDate)
+-            .andWhere("date", "<", endDate);
++            .andWhere("date", "<", endDate)
++            .orderBy("block_number")
++            .orderBy("transaction_index")
++            .orderBy("log_index");
+     }
+     queryLiquidityEventsByBlockNumber(type, fromBlock, toBlock, trx) {
+         return this.getBuilderContext("liquidity_events", trx)
+             .where("type", type)
+             .andWhere("block_number", ">=", fromBlock)
+-            .andWhere("block_number", "<=", toBlock);
++            .andWhere("block_number", "<=", toBlock)
++            .orderBy("block_number")
++            .orderBy("transaction_index")
++            .orderBy("log_index");
+     }
+     querySwapEventsByBlockNumber(fromBlock, toBlock, trx) {
+         return this.getBuilderContext("swap_events", trx)
+             .andWhere("block_number", ">=", fromBlock)
+-            .andWhere("block_number", "<=", toBlock);
++            .andWhere("block_number", "<=", toBlock)
++            .orderBy("block_number")
++            .orderBy("transaction_index")
++            .orderBy("log_index");
+     }
+     insertPoolConfig(poolConfig, trx) {
+         return this.getBuilderContext("pool_config", trx).insert([
+             {
+                 pool_config_id: poolConfig.id,
