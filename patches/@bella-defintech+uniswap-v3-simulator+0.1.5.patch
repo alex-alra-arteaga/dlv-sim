@@ -1,23 +1,24 @@
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
-index 2e87b12..f8cfaef 100644
+index 2e87b12..159fa90 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
-@@ -38,10 +38,19 @@ class MainnetDataDownloader {
+@@ -37,11 +37,18 @@ class MainnetDataDownloader {
+         // BTW, for most cases, it's the same as Initialization event block number. Let's take this now.
          return this.queryInitializationBlockNumber(poolAddress);
      }
-     async queryInitializationBlockNumber(poolAddress) {
-+        // Patched: scan logs in batches to avoid provider range limits
-+        const batchSize = 5000;
-         let uniswapV3Pool = await this.getCorePoolContarct(poolAddress);
+-    async queryInitializationBlockNumber(poolAddress) {
+-        let uniswapV3Pool = await this.getCorePoolContarct(poolAddress);
 -        let initializeTopic = uniswapV3Pool.filters.Initialize();
 -        let initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic);
 -        return initializationEvent[0].blockNumber;
-+        const initializeTopic = uniswapV3Pool.filters.Initialize();
++    async queryInitializationBlockNumber(poolAddress, batchSize = 5000) {
++        const pool = await this.getCorePoolContarct(poolAddress);
++        const topic = pool.filters.Initialize();
 +        const latest = await this.RPCProvider.getBlockNumber();
-+        for (let from = 0; from <= latest; from += (batchSize + 1)) {
++        for (let from = 0; from <= latest; from += batchSize + 1) {
 +            const to = Math.min(from + batchSize, latest);
-+            const logs = await uniswapV3Pool.queryFilter(initializeTopic, from, to);
-+            if (logs && logs.length > 0) {
++            const logs = await pool.queryFilter(topic, from, to);
++            if (logs.length) {
 +                return logs[0].blockNumber;
 +            }
 +        }
@@ -25,6 +26,29 @@ index 2e87b12..f8cfaef 100644
      }
      async parseEndBlockTypeWhenInit(toBlock, poolAddress) {
          switch (toBlock) {
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
+index e72b9f2..2136fab 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
+@@ -110,10 +110,18 @@ class CorePool {
+                 ? jsbi_1.default.add(TickMath_1.TickMath.MIN_SQRT_RATIO, InternalConstants_1.ONE)
+                 : jsbi_1.default.subtract(TickMath_1.TickMath.MAX_SQRT_RATIO, InternalConstants_1.ONE);
+         if (zeroForOne) {
++            console.log('[DEBUG swap] zeroForOne',
++                'limit', sqrtPriceLimitX96.toString(),
++                'current', this.sqrtPriceX96.toString(),
++                'amountSpecified', amountSpecified.toString());
+             assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, TickMath_1.TickMath.MIN_SQRT_RATIO), "RATIO_MIN");
+             assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, this.sqrtPriceX96), "RATIO_CURRENT");
+         }
+         else {
++            console.log('[DEBUG swap] oneForZero',
++                'limit', sqrtPriceLimitX96.toString(),
++                'current', this.sqrtPriceX96.toString(),
++                'amountSpecified', amountSpecified.toString());
+             assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, TickMath_1.TickMath.MAX_SQRT_RATIO), "RATIO_MAX");
+             assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, this.sqrtPriceX96), "RATIO_CURRENT");
+         }
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
 index f6e4bfb..417fe8d 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
