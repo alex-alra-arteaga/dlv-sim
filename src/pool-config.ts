@@ -5,6 +5,7 @@
  * pool-agnostic. It supports any Uniswap V3 pool with stable/volatile token pairs.
  */
 
+import path from "node:path";
 import { JSBI } from "./charm/types";
 import { FullMath } from "@bella-defintech/uniswap-v3-simulator";
 
@@ -229,7 +230,7 @@ export const WBTC_USDC_CONFIG: PoolConfig = {
   volatileToken: 'token0', // WBTC is volatile
   stableToken: 'token1',   // USDC is stable
   dbPath: "data/WBTC-USDC_0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35.db",
-  rebalanceLogDbPath: "rebalance_log_usdc_wbtc_3000.db",
+  rebalanceLogDbPath: "data/rebalance_log_usdc_wbtc_3000.db",
   displayName: "WBTC-USDC 0.3%"
 };
 
@@ -251,7 +252,7 @@ export const ETH_USDT_CONFIG: PoolConfig = {
   volatileToken: 'token0', // WETH is volatile
   stableToken: 'token1',   // USDT is stable
   dbPath: "data/ETH-USDT_0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36.db",
-  rebalanceLogDbPath: "rebalance_log_usdt_weth_500.db",
+  rebalanceLogDbPath: "data/rebalance_log_usdt_weth_500.db",
   displayName: "WETH-USDT 0.3%"
 };
 
@@ -285,7 +286,7 @@ export function createPoolConfig(
   
   const defaultDbPath = dbPathSuffix || 
     `${vol.symbol}-${stable.symbol}_${poolAddress}.db`;
-  const defaultRebalanceDbPath = 
+  const defaultRebalanceDbFilename = 
     `rebalance_log_${stable.symbol.toLowerCase()}_${vol.symbol.toLowerCase()}_${feeAmount}.db`;
   
   return {
@@ -296,7 +297,7 @@ export function createPoolConfig(
     volatileToken,
     stableToken,
     dbPath: `data/${defaultDbPath}`,
-    rebalanceLogDbPath: defaultRebalanceDbPath,
+    rebalanceLogDbPath: path.join("data", defaultRebalanceDbFilename),
     displayName: `${vol.symbol}-${stable.symbol} ${(feeAmount/10000).toFixed(2)}%`
   };
 }

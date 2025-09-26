@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import knexBuilder from "knex";
 import type { Knex } from "knex";
 import { DateConverter } from "@bella-defintech/uniswap-v3-simulator";
@@ -24,6 +26,10 @@ export class LogDBManager {
   private knex: Knex;
 
   constructor(dbPath: string) {
+    const dir = path.dirname(dbPath);
+    if (dir && dir !== ".") {
+      fs.mkdirSync(dir, { recursive: true });
+    }
     const config: Knex.Config = {
       client: "sqlite3",
       connection: {

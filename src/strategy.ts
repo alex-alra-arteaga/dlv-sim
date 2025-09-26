@@ -163,11 +163,39 @@ export async function buildStrategy(
           break;
         case EventType.BURN:
           try {
+            const ZERO = JSBI.BigInt(0);
+            const corePoolView = configurableCorePool.getCorePool();
+            const position = corePoolView.getPosition(
+              event.msgSender,
+              event.tickLower,
+              event.tickUpper
+            );
+            const availableLiquidity = position?.liquidity ?? ZERO;
+
+            if (JSBI.equal(availableLiquidity, ZERO)) {
+              console.warn(
+                `Warning: Burn skipped for position [${event.tickLower}, ${event.tickUpper}] owned by ${event.msgSender}; no liquidity recorded.`
+              );
+              break;
+            }
+
+            let burnLiquidity = event.liquidity;
+            if (JSBI.greaterThan(event.liquidity, availableLiquidity)) {
+              console.warn(
+                `Warning: Burn amount ${event.liquidity.toString()} exceeds available liquidity ${availableLiquidity.toString()} for position [${event.tickLower}, ${event.tickUpper}] owned by ${event.msgSender}; clamping to available.`
+              );
+              burnLiquidity = availableLiquidity;
+            }
+
+            if (JSBI.equal(burnLiquidity, ZERO)) {
+              break;
+            }
+
             await configurableCorePool.burn(
               event.msgSender,
               event.tickLower,
               event.tickUpper,
-              event.liquidity
+              burnLiquidity
             );
           } catch (burnError: any) {
             // Handle liquidity burn errors gracefully
@@ -265,7 +293,7 @@ export async function buildStrategy(
                   // console.warn('querySwap failed:', _qe?.message ?? _qe);
                 }
 
-                await configurableCorePool.swap(zeroForOne, amountSpecified, undefined);
+                await configurableCorePool.swap(zeroForOne, amountSpecified, sqrtPriceLimitX96);
                 // const returnedSqrt = (res as any).sqrtPriceX96 ? (res as any).sqrtPriceX96.toString() : configurableCorePool.getCorePool().sqrtPriceX96.toString();
               } catch (err) {
                 console.error('swap/pipeline error:', err);

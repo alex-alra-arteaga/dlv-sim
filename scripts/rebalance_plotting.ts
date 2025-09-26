@@ -17,10 +17,18 @@ dayjs.extend(customParse);
 // Get dynamic configuration from pool config
 const poolConfig = getCurrentPoolConfig();
 
+const rebalanceLogPath = poolConfig.getRebalanceLogDbPath();
+const dataDirFromRebalanceLog = (() => {
+  const dir = path.dirname(rebalanceLogPath);
+  if (dir && dir !== ".") return dir;
+  const fallback = path.dirname(poolConfig.getDbPath());
+  return fallback && fallback !== "." ? fallback : "data";
+})();
+
 const CONFIG = {
-  sqlitePath: poolConfig.getRebalanceLogDbPath(),
+  sqlitePath: rebalanceLogPath,
   tableName: "rebalanceLog",
-  outFile: "rebalance_dashboard.html",
+  outFile: path.join(dataDirFromRebalanceLog, "rebalance_dashboard.html"),
 
   // token decimals (from pool configuration)
   asset0Symbol: poolConfig.getToken0Symbol(),
@@ -612,9 +620,12 @@ async function main() {
     };
 
     const html = htmlTemplate(payload);
+    const outDir = path.resolve(path.dirname(CONFIG.outFile));
+    fs.mkdirSync(outDir, { recursive: true });
     const outPath = path.resolve(CONFIG.outFile);
     fs.writeFileSync(outPath, html);
     console.log(`✔ Dashboard written to ${outPath}`);
+    console.log("  • Mount this path from Docker (e.g. -v $(pwd)/data:/app/data) to access it on the host");
 
     // auto-open in default browser
     openInBrowser(outPath);
@@ -623,10 +634,35 @@ async function main() {
   }
 }
 
+function getBrowserSkipReason(): string | null {
+  const disable = process.env.NO_DASHBOARD_OPEN ?? process.env.NO_OPEN;
+  if (disable && ["1", "true", "yes"].includes(disable.toLowerCase())) {
+    return "explicitly disabled via environment variable";
+  }
+  if (process.env.CI === "true" || process.env.CI === "1") {
+    return "CI environment";
+  }
+  if (process.platform !== "win32") {
+    const hasDisplay = Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || process.env.MSWINDOWS);
+    if (!hasDisplay) {
+      return "no graphical display detected";
+    }
+  }
+  return null;
+}
+
 function openInBrowser(filePath: string) {
+  const skipReason = getBrowserSkipReason();
+  if (skipReason) {
+    console.log(`Skipping automatic browser open (${skipReason}).`);
+    console.log(`Open manually: ${path.resolve(filePath)}`);
+    return;
+  }
+
   const abs = path.resolve(filePath);
   const platform = process.platform;
-  let cmd: string, args: string[];
+  let cmd: string;
+  let args: string[];
 
   if (platform === "darwin") {        // macOS
     cmd = "open"; args = [abs];
@@ -635,8 +671,19 @@ function openInBrowser(filePath: string) {
   } else {                             // Linux/*nix
     cmd = "xdg-open"; args = [abs];
   }
-  const child = spawn(cmd, args, { stdio: "ignore", detached: true });
-  child.unref();
+
+  try {
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.on("error", (err) => {
+      console.warn(`Warning: Failed to auto-open dashboard (${err.message}).`);
+      console.warn(`         You can open it manually at ${abs}`);
+    });
+    child.unref();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`Warning: Failed to auto-open dashboard (${message}).`);
+    console.warn(`         You can open it manually at ${abs}`);
+  }
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

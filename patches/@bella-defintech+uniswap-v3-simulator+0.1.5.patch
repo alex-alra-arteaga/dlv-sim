@@ -1,8 +1,8 @@
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
-index 2e87b12..cf8cbde 100644
+index 2e87b12..99846ef 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
-@@ -37,11 +37,19 @@ class MainnetDataDownloader {
+@@ -37,11 +37,18 @@ class MainnetDataDownloader {
          // BTW, for most cases, it's the same as Initialization event block number. Let's take this now.
          return this.queryInitializationBlockNumber(poolAddress);
      }
@@ -19,44 +19,48 @@ index 2e87b12..cf8cbde 100644
 +            console.log(`Searching for Initialize event from block ${from} to ${Math.min(from + batchSize, latest)}`);
 +            const to = Math.min(from + batchSize, latest);
 +            const logs = await pool.queryFilter(topic, from, to);
-+            if (logs.length) {
++            if (logs.length)
 +                return logs[0].blockNumber;
-+            }
 +        }
 +        throw new Error("Initialize event not found");
      }
      async parseEndBlockTypeWhenInit(toBlock, poolAddress) {
          switch (toBlock) {
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
-index e72b9f2..a5175aa 100644
+index e72b9f2..c6d03c2 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
-@@ -110,11 +110,25 @@ class CorePool {
+@@ -14,6 +14,7 @@ const InternalConstants_1 = require("../enum/InternalConstants");
+ const SwapMath_1 = require("../util/SwapMath");
+ const LiquidityMath_1 = require("../util/LiquidityMath");
+ const FullMath_1 = require("../util/FullMath");
++const debugSwapLogs = process.env.UNIV3_SIM_DEBUG_SWAP === "1";
+ class CorePool {
+     constructor(token0, token1, fee, tickSpacing, token0Balance = jsbi_1.default.BigInt(0), token1Balance = jsbi_1.default.BigInt(0), sqrtPriceX96 = jsbi_1.default.BigInt(0), liquidity = jsbi_1.default.BigInt(0), tickCurrent = 0, feeGrowthGlobal0X128 = jsbi_1.default.BigInt(0), feeGrowthGlobal1X128 = jsbi_1.default.BigInt(0), tickManager = new TickManager_1.TickManager(), positionManager = new PositionManager_1.PositionManager()) {
+         this.token0 = token0;
+@@ -110,10 +111,22 @@ class CorePool {
                  ? jsbi_1.default.add(TickMath_1.TickMath.MIN_SQRT_RATIO, InternalConstants_1.ONE)
                  : jsbi_1.default.subtract(TickMath_1.TickMath.MAX_SQRT_RATIO, InternalConstants_1.ONE);
          if (zeroForOne) {
-+            console.log('[DEBUG swap] zeroForOne',
-+                'limit', sqrtPriceLimitX96.toString(),
-+                'current', this.sqrtPriceX96.toString(),
-+                'amountSpecified', amountSpecified.toString());
-             assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, TickMath_1.TickMath.MIN_SQRT_RATIO), "RATIO_MIN");
-+            if (!jsbi_1.default.lessThan(sqrtPriceLimitX96, this.sqrtPriceX96)) {
-+                sqrtPriceLimitX96 = jsbi_1.default.subtract(this.sqrtPriceX96, InternalConstants_1.ONE);
++            if (debugSwapLogs) {
++                console.log('[DEBUG swap] zeroForOne',
++                    'limit', sqrtPriceLimitX96.toString(),
++                    'current', this.sqrtPriceX96.toString(),
++                    'amountSpecified', amountSpecified.toString());
 +            }
+             assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, TickMath_1.TickMath.MIN_SQRT_RATIO), "RATIO_MIN");
              assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, this.sqrtPriceX96), "RATIO_CURRENT");
          }
          else {
-+            console.log('[DEBUG swap] oneForZero',
-+                'limit', sqrtPriceLimitX96.toString(),
-+                'current', this.sqrtPriceX96.toString(),
-+                'amountSpecified', amountSpecified.toString());
-             assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, TickMath_1.TickMath.MAX_SQRT_RATIO), "RATIO_MAX");
-+            if (!jsbi_1.default.greaterThan(sqrtPriceLimitX96, this.sqrtPriceX96)) {
-+                sqrtPriceLimitX96 = jsbi_1.default.add(this.sqrtPriceX96, InternalConstants_1.ONE);
++            if (debugSwapLogs) {
++                console.log('[DEBUG swap] oneForZero',
++                    'limit', sqrtPriceLimitX96.toString(),
++                    'current', this.sqrtPriceX96.toString(),
++                    'amountSpecified', amountSpecified.toString());
 +            }
+             assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, TickMath_1.TickMath.MAX_SQRT_RATIO), "RATIO_MAX");
              assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, this.sqrtPriceX96), "RATIO_CURRENT");
          }
-         const exactInput = jsbi_1.default.greaterThanOrEqual(amountSpecified, InternalConstants_1.ZERO);
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
 index f6e4bfb..417fe8d 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
@@ -114,10 +118,22 @@ index 02b6bb1..1dba0ca 100644
 +export declare function getNext4Hour(date: Date): Date;
 \ No newline at end of file
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
-index a7c3999..e48a1ac 100644
+index a7c3999..d62a78a 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
-@@ -15,6 +15,18 @@ exports.getYesterday = getYesterday;
+@@ -2,10 +2,7 @@
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.format = exports.getTomorrow = exports.getYesterday = exports.getDate = void 0;
+ function getDate(year, month, day, hour = 0, minute = 0, second = 0, millisecond = 0) {
+-    let date = new Date();
+-    date.setFullYear(year, month - 1, day);
+-    date.setHours(hour, minute, second, millisecond);
+-    return date;
++    return new Date(Date.UTC(year, month - 1, day, hour, minute, second, millisecond));
+ }
+ exports.getDate = getDate;
+ function getYesterday(date) {
+@@ -15,6 +12,18 @@ exports.getYesterday = getYesterday;
  function getTomorrow(date) {
      return new Date(date.getTime() + 24 * 60 * 60 * 1000);
  }
