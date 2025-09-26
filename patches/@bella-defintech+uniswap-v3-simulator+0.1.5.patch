@@ -111,7 +111,7 @@ index a7c3999..d62a78a 100644
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
 @@ -2,10 +2,7 @@
  Object.defineProperty(exports, "__esModule", { value: true });
- exports.format = exports.getTomorrow = exports.getYesterday = exports.getDate = void 0;
+ exports.format = exports.getNext4Hour = exports.getNextMinute = exports.getNextHour = exports.getTomorrow = exports.getYesterday = exports.getDate = void 0;
  function getDate(year, month, day, hour = 0, minute = 0, second = 0, millisecond = 0) {
 -    let date = new Date();
 -    date.setFullYear(year, month - 1, day);
