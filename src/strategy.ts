@@ -219,7 +219,7 @@ export async function buildStrategy(
                   // console.warn('querySwap failed:', _qe?.message ?? _qe);
                 }
 
-                await configurableCorePool.swap(zeroForOne, amountSpecified, sqrtPriceLimitX96);
+                await configurableCorePool.swap(zeroForOne, amountSpecified, undefined);
                 // const returnedSqrt = (res as any).sqrtPriceX96 ? (res as any).sqrtPriceX96.toString() : configurableCorePool.getCorePool().sqrtPriceX96.toString();
               } catch (err) {
                 console.error('swap/pipeline error:', err);
