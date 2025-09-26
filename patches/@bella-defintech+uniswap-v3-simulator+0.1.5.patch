@@ -42,22 +42,10 @@ index e72b9f2..c6d03c2 100644
                  ? jsbi_1.default.add(TickMath_1.TickMath.MIN_SQRT_RATIO, InternalConstants_1.ONE)
                  : jsbi_1.default.subtract(TickMath_1.TickMath.MAX_SQRT_RATIO, InternalConstants_1.ONE);
          if (zeroForOne) {
-+            if (debugSwapLogs) {
-+                console.log('[DEBUG swap] zeroForOne',
-+                    'limit', sqrtPriceLimitX96.toString(),
-+                    'current', this.sqrtPriceX96.toString(),
-+                    'amountSpecified', amountSpecified.toString());
-+            }
              assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, TickMath_1.TickMath.MIN_SQRT_RATIO), "RATIO_MIN");
              assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, this.sqrtPriceX96), "RATIO_CURRENT");
          }
          else {
-+            if (debugSwapLogs) {
-+                console.log('[DEBUG swap] oneForZero',
-+                    'limit', sqrtPriceLimitX96.toString(),
-+                    'current', this.sqrtPriceX96.toString(),
-+                    'amountSpecified', amountSpecified.toString());
-+            }
              assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, TickMath_1.TickMath.MAX_SQRT_RATIO), "RATIO_MAX");
              assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, this.sqrtPriceX96), "RATIO_CURRENT");
          }
