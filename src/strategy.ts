@@ -206,6 +206,51 @@ export async function buildStrategy(
                   }
                 }
 
+                const corePool = configurableCorePool.getCorePool();
+                if (JSBI.equal(corePool.sqrtPriceX96, (event as SwapEvent).sqrtPriceX96)) {
+                  // Event already applied; skip duplicate occurrence.
+                  break;
+                }
+
+                if (!sqrtPriceLimitX96) {
+                  const ONE = JSBI.BigInt(1);
+                  const minLimit = JSBI.add(TickMath.MIN_SQRT_RATIO, ONE);
+                  const maxLimit = JSBI.subtract(TickMath.MAX_SQRT_RATIO, ONE);
+                  if (zeroForOne) {
+                    const target = JSBI.greaterThan(event.sqrtPriceX96, minLimit)
+                      ? JSBI.subtract(event.sqrtPriceX96, ONE)
+                      : minLimit;
+                    sqrtPriceLimitX96 = JSBI.greaterThan(target, TickMath.MIN_SQRT_RATIO)
+                      ? target
+                      : minLimit;
+                  } else {
+                    const target = JSBI.lessThan(event.sqrtPriceX96, maxLimit)
+                      ? JSBI.add(event.sqrtPriceX96, ONE)
+                      : maxLimit;
+                    sqrtPriceLimitX96 = JSBI.lessThan(target, TickMath.MAX_SQRT_RATIO)
+                      ? target
+                      : maxLimit;
+                  }
+                }
+
+                const ONE = JSBI.BigInt(1);
+                const currentSqrt = corePool.sqrtPriceX96;
+                if (zeroForOne) {
+                  const minLimit = JSBI.add(TickMath.MIN_SQRT_RATIO, ONE);
+                  if (!JSBI.lessThan(sqrtPriceLimitX96, currentSqrt)) {
+                    sqrtPriceLimitX96 = JSBI.greaterThan(currentSqrt, minLimit)
+                      ? JSBI.subtract(currentSqrt, ONE)
+                      : minLimit;
+                  }
+                } else {
+                  const maxLimit = JSBI.subtract(TickMath.MAX_SQRT_RATIO, ONE);
+                  if (!JSBI.greaterThan(sqrtPriceLimitX96, currentSqrt)) {
+                    sqrtPriceLimitX96 = JSBI.lessThan(currentSqrt, maxLimit)
+                      ? JSBI.add(currentSqrt, ONE)
+                      : maxLimit;
+                  }
+                }
+
                 // Dry-run the swap to inspect expected effects without mutating state
                 try {
                   // const q = await configurableCorePool.querySwap(zeroForOne, amountSpecified, sqrtPriceLimitX96);
