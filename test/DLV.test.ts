@@ -2,7 +2,6 @@ import JSBI from "jsbi";
 import {
   CorePoolView,
   EventDBManager,
-  getDate,
 } from "@bella-defintech/uniswap-v3-simulator";
 import { safeToBN } from "../src/utils";
 import { BigNumber as BN } from "ethers";
