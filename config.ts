@@ -1,10 +1,10 @@
 import { VaultParams } from "./src/charm/types";
 import { LookUpPeriod } from "./src/enums";
-import { setCurrentPoolConfig, WBTC_USDC_CONFIG } from "./src/pool-config";
+import { setCurrentPoolConfig, ETH_USDT_CONFIG } from "./src/pool-config";
 
 // Initialize the pool configuration (this will be used throughout the application)
 // To use a different pool, change this line to import and set a different configuration
-setCurrentPoolConfig(WBTC_USDC_CONFIG);
+setCurrentPoolConfig(ETH_USDT_CONFIG);
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
 
@@ -32,11 +32,11 @@ export const charmConfig: VaultParams = (() => {
   const override = parseEnvJSON<VaultParams>("BF_CHARM_JSON");
   if (override) return override;
   return {
-    wideRangeWeight: 100000,
-    wideThreshold: 12000,
+    wideRangeWeight: 150000,
+    wideThreshold: 7980,
     baseThreshold: 3600,
     limitThreshold: 900,
-    period: 86400,
+    period: 172800,
   } satisfies VaultParams;
 })();
 
@@ -58,8 +58,8 @@ export const dlvConfig: DLVConfig = (() => {
   if (override) return override;
   return {
     period: undefined,
-    deviationThresholdAbove: 0.1,
-    deviationThresholdBelow: 0.1,
+    deviationThresholdAbove: 0.2,
+    deviationThresholdBelow: 0.2,
     debtToVolatileSwapFee: 0.0015,
   } satisfies DLVConfig;
 })();

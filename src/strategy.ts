@@ -13,6 +13,7 @@ import {
   getNextMinute,
   getNext4Hour,
   TickMath,
+  getDate,
 } from "@bella-defintech/uniswap-v3-simulator";
 import {
   LookUpPeriod,
@@ -171,7 +172,10 @@ export async function buildStrategy(
             );
           } catch (burnError: any) {
             // Handle liquidity burn errors gracefully
-            if (burnError.message?.includes('NP') || burnError.message?.includes('Not Positive')) {
+            if (burnError.message?.includes('NP') || 
+                burnError.message?.includes('Not Positive') ||
+                burnError.message?.includes('Liquidity Underflow') ||
+                burnError.message?.includes('INVALID_TICK')) {
               console.warn(`Warning: Cannot burn ${event.liquidity.toString()} liquidity from position [${event.tickLower}, ${event.tickUpper}] for ${event.msgSender}. Position may have insufficient liquidity. Skipping event.`);
               // Skip this burn event and continue with simulation
             } else {
@@ -277,6 +281,25 @@ export async function buildStrategy(
           // @ts-ignore: ExhaustiveCheck
           const exhaustiveCheck: never = event;
       }
+    }
+
+    // WARMUP PHASE: Replay all events from pool creation to startDate to build accurate pool state
+    console.log('[WARMUP] Replaying events from pool creation to startDate to build initial pool state...');
+    // Use pool creation date - May 5, 2021 for both WETH-USDT and WBTC-USDC
+    const poolCreationDate = getDate(2021, 5, 5);
+    if (poolCreationDate < startDate) {
+      console.log(`[WARMUP] Pool created: ${fmtUTC(poolCreationDate)}, Backtest starts: ${fmtUTC(startDate)}`);
+      let warmupEventsCount = 0;
+      for await (const event of streamEventsByDate(poolCreationDate, startDate)) {
+        await replayEvent(event);
+        warmupEventsCount++;
+        if (warmupEventsCount % 10000 === 0) {
+          console.log(`[WARMUP] Replayed ${warmupEventsCount} events...`);
+        }
+      }
+      console.log(`[WARMUP] Completed. Replayed ${warmupEventsCount} total events. Pool state ready for backtest.`);
+    } else {
+      console.log('[WARMUP] Skipped - startDate equals or predates pool creation');
     }
 
     // replay event and call user custom strategy
