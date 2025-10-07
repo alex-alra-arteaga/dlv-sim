@@ -244,8 +244,8 @@ export const WBTC_USDC_CONFIG: PoolConfig = {
   dbPath: "data/WBTC-USDC_0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35.db",
   rebalanceLogDbPath: "rebalance_log_usdc_wbtc_3000.db",
   displayName: "WBTC-USDC 0.3%",
-  startDate: getDate(2021, 5, 23),  // Pool started May 5, 2021, but use May 9 for clean start
-  endDate: getDate(2024, 9, 5)     // Use Sept 5, 2024 for consistency
+  startDate: getDate(2021, 5, 6),  // Pool started May 5, 2021, but use May 9 for clean start
+  endDate: getDate(2024, 12, 15)     // Use Sept 5, 2024 for consistency
 };
 
 export const ETH_USDT_CONFIG: PoolConfig = {
