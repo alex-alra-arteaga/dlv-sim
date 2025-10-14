@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { isDebtNeuralRebalancing } from "../config";
 
 const RESULTS_PATH = path.join(process.cwd(), "brute-force-results.jsonl");
 const OUTPUT_HTML = path.join(process.cwd(), "brute-force-report.html");
@@ -72,7 +73,8 @@ const scriptTemplatePath = path.join(process.cwd(), "scripts/templates/brute-for
 const scriptTemplate = fs.readFileSync(scriptTemplatePath, "utf8");
 const scriptContent = scriptTemplate
   .replace("__DATASET__", JSON.stringify(dataset))
-  .replace("__SUMMARY__", JSON.stringify(summary));
+  .replace("__SUMMARY__", JSON.stringify(summary))
+  .replace("__DEBT_AGENT_ENABLED__", JSON.stringify(isDebtNeuralRebalancing));
 
 const html = `<!doctype html>
 <html lang="en">
@@ -197,6 +199,26 @@ const html = `<!doctype html>
       #heatmaps { min-height: 420px; }
       #pdpSurface, #iceSurface, #embedding, #parallel { min-height: 420px; }
       #importanceChart, #interactionChart { min-height: 360px; }
+      .status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border-radius: 999px;
+        padding: 4px 10px;
+        font-weight: 600;
+        font-size: 12px;
+        border: 1px solid var(--panel-border);
+        background: rgba(37, 99, 235, 0.08);
+        color: #1d4ed8;
+      }
+      .status-chip.off {
+        background: rgba(148, 163, 184, 0.12);
+        color: #475569;
+      }
+      .status-chip .icon {
+        font-size: 14px;
+        line-height: 1;
+      }
     </style>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   </head>

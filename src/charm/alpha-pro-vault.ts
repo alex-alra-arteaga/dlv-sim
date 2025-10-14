@@ -6,8 +6,8 @@ import { CorePoolView, TickMath, FullMath } from "@bella-defintech/uniswap-v3-si
 import {SqrtPriceMath} from "@bella-defintech/uniswap-v3-simulator/dist/util/SqrtPriceMath";
 import { Big, VaultParams, JSBI } from "./types";
 import { Engine } from "../engine";
-import { MANAGER, Q96, TARGET_CR, ALLOWED_DUST0, ALLOWED_DUST1 } from "../internal_constants";
-import { dlvConfig } from "../../config";
+import { MANAGER, Q96, ALLOWED_DUST0, ALLOWED_DUST1 } from "../internal_constants";
+import { dlvConfig, targetCR } from "../../config";
 import { PoolConfigManager, getCurrentPoolConfig } from "../pool-config";
 import {
   ensure,
@@ -690,11 +690,39 @@ export class AlphaProVault {
       this.virtualDebt = sub(this.virtualDebt, repay);
     }
     const A1 = await this.getTotalAmounts(false);
-    const targetCrPercent = rebalanceBorrowedAmount.mode === "leverage" || rebalanceBorrowedAmount.mode === "deleverage"
-      ? rebalanceBorrowedAmount.postCR
-      : Number(TARGET_CR) / 1e16;
-    const targetCrScaledStr = targetCrPercent.toFixed(16).replace('.', '');
-    const targetCrWad = JSBI.BigInt(targetCrScaledStr);
+
+    const percentToWad = (percent: number): JSBI => {
+      const normalized = percent.toFixed(16);
+      const negative = normalized.startsWith("-");
+      const unsigned = negative ? normalized.slice(1) : normalized;
+      const [integerPart, fractionalPart = ""] = unsigned.split(".");
+      const paddedFraction = fractionalPart.padEnd(16, "0");
+      const digits = `${integerPart}${paddedFraction}`.replace(/^0+(?=\d)/, "");
+      const signedDigits = negative ? `-${digits || "0"}` : digits || "0";
+      return JSBI.BigInt(signedDigits);
+    };
+
+    const wadToPercent = (wadValue: JSBI): number => {
+      const raw = wadValue.toString();
+      const negative = raw.startsWith("-");
+      const unsigned = negative ? raw.slice(1) : raw;
+      const intLen = unsigned.length > 16 ? unsigned.length - 16 : 0;
+      const integerPart = intLen > 0 ? unsigned.slice(0, intLen) : "0";
+      const fractionalPart = unsigned.slice(intLen).padStart(16, "0");
+      const formatted = `${integerPart}.${fractionalPart}`;
+      const numeric = Number(formatted);
+      return negative ? -numeric : numeric;
+    };
+
+    const candidatePercent =
+      rebalanceBorrowedAmount.mode === "leverage" || rebalanceBorrowedAmount.mode === "deleverage"
+        ? rebalanceBorrowedAmount.postCR
+        : undefined;
+
+    const useCandidate = candidatePercent !== undefined && Number.isFinite(candidatePercent) && candidatePercent > 0;
+
+    let targetCrPercent = useCandidate ? candidatePercent : wadToPercent(targetCR);
+    let targetCrWad = useCandidate ? percentToWad(targetCrPercent) : targetCR;
 
     const pv = (totals: {total0:JSBI,total1:JSBI}, debt: JSBI) => {
       const volatileValueInStable = this.volatileToStableValue(totals.total0, priceSnap);
@@ -711,6 +739,12 @@ export class AlphaProVault {
       maxUint128: MAX_UINT128.toString()
     });
     const crWad       = await this._collateralRatioWad(false);
+
+    if (JSBI.equal(this.virtualDebt, ZERO)) {
+      targetCrWad = crWad;
+      targetCrPercent = wadToPercent(crWad);
+    }
+
     const diffWad     = JSBI.greaterThan(crWad, targetCrWad)
       ? sub(crWad, targetCrWad)
       : sub(targetCrWad, crWad);
@@ -999,7 +1033,6 @@ async getPositionPriceRanges() {
       if (eq(B, ZERO)) return { mode: "noop" };
     
       // Helper to simulate integer post-CR given B
-      const TARGET_CR_WAD = JSBI.BigInt(TARGET_CR); // e.g. 2e18
       const sim = (Btest: JSBI) => {
         const X            = FullMath.mulDiv(Btest, WAD, denomWAD);        // USDC in to swap
         const swapFeeUSDC  = FullMath.mulDiv(X, feeNum, FEE_DEN);          // fee on input
@@ -1014,13 +1047,13 @@ async getPositionPriceRanges() {
       let { X, swapFeeUSDC, crWad } = sim(B);
       const MAX_STEPS = 2000; // tiny (~$0.002 in stable) max adjustments on small positions
       let steps = 0;
-      if (JSBI.greaterThan(crWad, TARGET_CR_WAD)) {
+      if (JSBI.greaterThan(crWad, targetCR)) {
         // borrow a touch more until crWad <= TARGET (or we hit MAX_STEPS)
         while (steps++ < MAX_STEPS) {
           B = JSBI.add(B, JSBI.BigInt(1));
           const res = sim(B);
           crWad = res.crWad; X = res.X; swapFeeUSDC = res.swapFeeUSDC;
-          if (!JSBI.greaterThan(crWad, TARGET_CR_WAD)) break;
+          if (!JSBI.greaterThan(crWad, targetCR)) break;
         }
       } else {
         // if we undershot, try to reduce by a hair but don't cross over
@@ -1028,7 +1061,7 @@ async getPositionPriceRanges() {
           if (JSBI.lessThanOrEqual(B, JSBI.BigInt(1))) break;
           const Btry = JSBI.subtract(B, JSBI.BigInt(1));
           const res  = sim(Btry);
-          if (JSBI.lessThanOrEqual(res.crWad, TARGET_CR_WAD)) {
+          if (JSBI.lessThanOrEqual(res.crWad, targetCR)) {
             B = Btry; crWad = res.crWad; X = res.X; swapFeeUSDC = res.swapFeeUSDC;
           } else break;
         }
@@ -1146,6 +1179,11 @@ async getPositionPriceRanges() {
 
       // closed-form target W (value to withdraw)
       const W = ceilDiv(FullMath.mulDiv(deficit, WAD, JSBI.BigInt(1)), denomDelWAD); // = deficit / (1 - 2f/(R+1))
+
+      // can we actually hit target? (W ≤ V0)
+      // equivalent to deficit ≤ V0 * denomDelWAD / WAD (robust version avoids recomputation):
+      // JSBI.lessThanOrEqual(W, V0) ||
+      // JSBI.lessThanOrEqual(deficit, FullMath.mulDiv(V0, denomDelWAD, WAD));
 
       // ---- CAP to feasible amounts
       const Wcap = JSBI.lessThanOrEqual(W, V0) ? W : V0;

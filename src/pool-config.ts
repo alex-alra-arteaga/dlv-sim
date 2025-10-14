@@ -6,7 +6,7 @@
  */
 
 import { JSBI } from "./charm/types";
-import { FullMath, getDate } from "@bella-defintech/uniswap-v3-simulator";
+import { FullMath } from "@bella-defintech/uniswap-v3-simulator";
 
 export interface TokenConfig {
   symbol: string;
@@ -34,10 +34,6 @@ export interface PoolConfig {
   
   // Display configuration
   displayName: string; // e.g., "WBTC-USDC 0.3%"
-  
-  // Date range for backtesting
-  startDate: Date;
-  endDate: Date;
 }
 
 export class PoolConfigManager {
@@ -253,7 +249,7 @@ export const ETH_USDT_CONFIG: PoolConfig = {
   feeAmount: 3000,
   token0: {
     symbol: "WETH",
-    name: "Wrapped Ether",
+    name: "Wrapped Ethereum",
     decimals: 18,
     address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
   },

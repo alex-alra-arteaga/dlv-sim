@@ -6,8 +6,8 @@ import Decimal from "decimal.js-light";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import customParse from "dayjs/plugin/customParseFormat.js";
-import "../config";
 import { getCurrentPoolConfig } from "../src/pool-config";
+import { isDebtNeuralRebalancing } from "../config";
 import { TickMath, FullMath } from "@bella-defintech/uniswap-v3-simulator";
 import JSBI from "jsbi";
 
@@ -265,7 +265,7 @@ function aggregate(rows: Series, g: Grain): Series {
   return out;
 }
 
-function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: Series; a0: string; a1: string; volatileSymbol: string; stableSymbol: string }): string {
+function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: Series; a0: string; a1: string; volatileSymbol: string; stableSymbol: string; debtAgentEnabled: boolean }): string {
   const dataJSON = JSON.stringify(payload);
   return `<!doctype html>
 <html lang="en">
@@ -285,6 +285,10 @@ function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: 
   .kpi .box { padding:8px 10px; border-radius:10px; background:#f3f4f6;}
   .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;}
   h2{margin:8px 0 4px 4px; font-size:16px;}
+  .status-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;border-radius:999px;padding:6px 12px;font-weight:600;}
+  .status-chip .icon{font-size:14px;line-height:1;}
+  .status-chip.on{background:#e0e7ff;color:#312e81;}
+  .status-chip.off{background:#fee2e2;color:#991b1b;}
 </style>
 </head>
 <body>
@@ -297,6 +301,10 @@ function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: 
       </select>
     </label>
     <div class="muted">• Drag the range slider under each chart to zoom</div>
+    <div class="status-chip ${payload.debtAgentEnabled ? "on" : "off"}" title="Debt neural agent status">
+      <span class="icon">${payload.debtAgentEnabled ? "🧠" : "⚙️"}</span>
+      <span>${payload.debtAgentEnabled ? "Debt neural agent enabled" : "Debt neural agent disabled"}</span>
+    </div>
   </div>
 
   <div class="kpi">
@@ -609,7 +617,8 @@ async function main() {
       a0: CONFIG.asset0Symbol,
       a1: CONFIG.asset1Symbol,
       volatileSymbol: CONFIG.volatileSymbol,
-      stableSymbol: CONFIG.stableSymbol
+      stableSymbol: CONFIG.stableSymbol,
+      debtAgentEnabled: isDebtNeuralRebalancing
     };
 
     const html = htmlTemplate(payload);
@@ -626,6 +635,7 @@ async function main() {
 
 function openInBrowser(filePath: string) {
   const abs = path.resolve(filePath);
+  const url = `file://${abs}`;
   const platform = process.platform;
   let cmd: string, args: string[];
 

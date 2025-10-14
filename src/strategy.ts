@@ -140,7 +140,7 @@ export async function buildStrategy(
     let account: Account = await buildAccount(configurableCorePool.getCorePool())
 
     // This is an implementation of Engine interface based on the Tuner.
-    let engine = await buildDryRunEngine(configurableCorePool);
+    let engine = await buildDryRunEngine(account, configurableCorePool);
 
     // First vault deposit to which we compare strategy performance
     await initializeAccountVault(account, engine);
@@ -172,10 +172,7 @@ export async function buildStrategy(
             );
           } catch (burnError: any) {
             // Handle liquidity burn errors gracefully
-            if (burnError.message?.includes('NP') || 
-                burnError.message?.includes('Not Positive') ||
-                burnError.message?.includes('Liquidity Underflow') ||
-                burnError.message?.includes('INVALID_TICK')) {
+            if (burnError.message?.includes('NP') || burnError.message?.includes('Not Positive')) {
               console.warn(`Warning: Cannot burn ${event.liquidity.toString()} liquidity from position [${event.tickLower}, ${event.tickUpper}] for ${event.msgSender}. Position may have insufficient liquidity. Skipping event.`);
               // Skip this burn event and continue with simulation
             } else {

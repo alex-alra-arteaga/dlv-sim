@@ -1,12 +1,34 @@
-import { VaultParams } from "./src/charm/types";
+import { JSBI, VaultParams } from "./src/charm/types";
 import { LookUpPeriod } from "./src/enums";
-import { setCurrentPoolConfig, ETH_USDT_CONFIG } from "./src/pool-config";
+import { setCurrentPoolConfig, WBTC_USDC_CONFIG } from "./src/pool-config";
 
 // Initialize the pool configuration (this will be used throughout the application)
 // To use a different pool, change this line to import and set a different configuration
-setCurrentPoolConfig(ETH_USDT_CONFIG);
+setCurrentPoolConfig(WBTC_USDC_CONFIG);
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
+export const isDebtNeuralRebalancing = true; // Whether to enable debt neutral rebalancing
+export let targetCR = JSBI.BigInt(2e18); // 200% in WAD
+
+export function setTargetCR(value: JSBI) {
+  targetCR = value;
+}
+
+export type DebtAgentConfig = {
+  topLeverage: number;
+  bottomLeverage: number;
+  horizonSeconds: number;
+};
+
+export const debtAgentConfig: DebtAgentConfig = (() => {
+  const override = parseEnvJSON<DebtAgentConfig>("BF_DEBT_AGENT_JSON");
+  if (override) return override;
+  return {
+    topLeverage: 2.2,
+    bottomLeverage: 1.8,
+    horizonSeconds: 600,
+  } satisfies DebtAgentConfig;
+})();
 
 // Pool-agnostic vault configuration
 // These parameters work for any pool but can be adjusted per pool if needed
@@ -32,11 +54,11 @@ export const charmConfig: VaultParams = (() => {
   const override = parseEnvJSON<VaultParams>("BF_CHARM_JSON");
   if (override) return override;
   return {
-    wideRangeWeight: 150000,
-    wideThreshold: 7980,
+    wideRangeWeight: 100000,
+    wideThreshold: 12000,
     baseThreshold: 3600,
     limitThreshold: 900,
-    period: 172800,
+    period: 86400,
   } satisfies VaultParams;
 })();
 
@@ -58,8 +80,8 @@ export const dlvConfig: DLVConfig = (() => {
   if (override) return override;
   return {
     period: undefined,
-    deviationThresholdAbove: 0.2,
-    deviationThresholdBelow: 0.2,
+    deviationThresholdAbove: 0.1,
+    deviationThresholdBelow: 0.1,
     debtToVolatileSwapFee: 0.0015,
   } satisfies DLVConfig;
 })();
