@@ -1,8 +1,8 @@
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
-index 2e87b12..8dbf5dc 100644
+index 2e87b12..cf8cbde 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
-@@ -37,11 +37,18 @@ class MainnetDataDownloader {
+@@ -37,11 +37,19 @@ class MainnetDataDownloader {
          // BTW, for most cases, it's the same as Initialization event block number. Let's take this now.
          return this.queryInitializationBlockNumber(poolAddress);
      }
@@ -12,20 +12,95 @@ index 2e87b12..8dbf5dc 100644
 -        let initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic);
 -        return initializationEvent[0].blockNumber;
 +    async queryInitializationBlockNumber(poolAddress, batchSize = 5000) {
-+      const pool = await this.getCorePoolContarct(poolAddress);
-+      const topic = pool.filters.Initialize();
-+      const latest = await this.RPCProvider.getBlockNumber();
-+
-+      for (let from = 0; from <= latest; from += (batchSize + 1)) {
-+        console.log(`Searching for Initialize event from block ${from} to ${Math.min(from + batchSize, latest)}`);
-+        const to = Math.min(from + batchSize, latest);
-+        const logs = await pool.queryFilter(topic, from, to);
-+        if (logs.length) return logs[0].blockNumber;
-+      }
-+      throw new Error("Initialize event not found");
++        const pool = await this.getCorePoolContarct(poolAddress);
++        const topic = pool.filters.Initialize();
++        const latest = await this.RPCProvider.getBlockNumber();
++        for (let from = 0; from <= latest; from += batchSize + 1) {
++            console.log(`Searching for Initialize event from block ${from} to ${Math.min(from + batchSize, latest)}`);
++            const to = Math.min(from + batchSize, latest);
++            const logs = await pool.queryFilter(topic, from, to);
++            if (logs.length) {
++                return logs[0].blockNumber;
++            }
++        }
++        throw new Error("Initialize event not found");
      }
      async parseEndBlockTypeWhenInit(toBlock, poolAddress) {
          switch (toBlock) {
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
+index e72b9f2..a5175aa 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
+@@ -110,11 +110,25 @@ class CorePool {
+                 ? jsbi_1.default.add(TickMath_1.TickMath.MIN_SQRT_RATIO, InternalConstants_1.ONE)
+                 : jsbi_1.default.subtract(TickMath_1.TickMath.MAX_SQRT_RATIO, InternalConstants_1.ONE);
+         if (zeroForOne) {
++            console.log('[DEBUG swap] zeroForOne',
++                'limit', sqrtPriceLimitX96.toString(),
++                'current', this.sqrtPriceX96.toString(),
++                'amountSpecified', amountSpecified.toString());
+             assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, TickMath_1.TickMath.MIN_SQRT_RATIO), "RATIO_MIN");
++            if (!jsbi_1.default.lessThan(sqrtPriceLimitX96, this.sqrtPriceX96)) {
++                sqrtPriceLimitX96 = jsbi_1.default.subtract(this.sqrtPriceX96, InternalConstants_1.ONE);
++            }
+             assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, this.sqrtPriceX96), "RATIO_CURRENT");
+         }
+         else {
++            console.log('[DEBUG swap] oneForZero',
++                'limit', sqrtPriceLimitX96.toString(),
++                'current', this.sqrtPriceX96.toString(),
++                'amountSpecified', amountSpecified.toString());
+             assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, TickMath_1.TickMath.MAX_SQRT_RATIO), "RATIO_MAX");
++            if (!jsbi_1.default.greaterThan(sqrtPriceLimitX96, this.sqrtPriceX96)) {
++                sqrtPriceLimitX96 = jsbi_1.default.add(this.sqrtPriceX96, InternalConstants_1.ONE);
++            }
+             assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, this.sqrtPriceX96), "RATIO_CURRENT");
+         }
+         const exactInput = jsbi_1.default.greaterThanOrEqual(amountSpecified, InternalConstants_1.ZERO);
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
+index f6e4bfb..417fe8d 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/manager/EventDBManager.js
+@@ -201,23 +201,35 @@ class EventDBManager {
+         return this.getBuilderContext("liquidity_events", trx)
+             .where("type", type)
+             .andWhere("date", ">=", startDate)
+-            .andWhere("date", "<", endDate);
++            .andWhere("date", "<", endDate)
++            .orderBy("block_number")
++            .orderBy("transaction_index")
++            .orderBy("log_index");
+     }
+     querySwapEventsByDate(startDate, endDate, trx) {
+         return this.getBuilderContext("swap_events", trx)
+             .andWhere("date", ">=", startDate)
+-            .andWhere("date", "<", endDate);
++            .andWhere("date", "<", endDate)
++            .orderBy("block_number")
++            .orderBy("transaction_index")
++            .orderBy("log_index");
+     }
+     queryLiquidityEventsByBlockNumber(type, fromBlock, toBlock, trx) {
+         return this.getBuilderContext("liquidity_events", trx)
+             .where("type", type)
+             .andWhere("block_number", ">=", fromBlock)
+-            .andWhere("block_number", "<=", toBlock);
++            .andWhere("block_number", "<=", toBlock)
++            .orderBy("block_number")
++            .orderBy("transaction_index")
++            .orderBy("log_index");
+     }
+     querySwapEventsByBlockNumber(fromBlock, toBlock, trx) {
+         return this.getBuilderContext("swap_events", trx)
+             .andWhere("block_number", ">=", fromBlock)
+-            .andWhere("block_number", "<=", toBlock);
++            .andWhere("block_number", "<=", toBlock)
++            .orderBy("block_number")
++            .orderBy("transaction_index")
++            .orderBy("log_index");
+     }
+     insertPoolConfig(poolConfig, trx) {
+         return this.getBuilderContext("pool_config", trx).insert([
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
 index 02b6bb1..1dba0ca 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts

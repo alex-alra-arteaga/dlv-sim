@@ -30,6 +30,44 @@ Run the simulation:
 yarn simulate
 ```
 
+## Docker
+
+You can run the full toolchain inside a Linux container so it behaves the same on EC2 and macOS.
+
+### Build the image
+
+```bash
+docker build -t dlv-sim .
+```
+
+The image defaults to Node.js 23 to mirror the macOS setup. If you need a different release, pass `--build-arg NODE_VERSION=20-bookworm` (for example).
+
+### Run commands inside the container
+
+The default command executes the test suite:
+
+```bash
+docker run --rm -it \
+    --env-file .env \
+    -v $(pwd)/data:/app/data \
+    dlv-sim
+```
+
+- Mount the `data/` directory to reuse your local SQLite datasets without baking them into the image.
+- Provide environment variables (e.g. RPC credentials) through `--env-file` or `-e` flags.
+
+Override the command to run other workflows, such as the brute-force search:
+
+```bash
+docker run --rm -it \
+    --env-file .env \
+    -v $(pwd)/data:/app/data \
+    dlv-sim \
+    yarn brute-force:light --heapMB 1024 --concurrency 9 --runs 0 --reporter min --seed 42
+```
+
+For long-running jobs on EC2, you can add `-d` (detached) and redirect output to a log file or use the instance's process manager as needed.
+
 ## Configuration
 
 Configure parameters in `config.json` to adjust Charm, DLV and simulation look-up period settings.

@@ -12,7 +12,8 @@ import {
   getNextHour,
   getNextMinute,
   getNext4Hour,
-  toBN,
+  TickMath,
+  getDate,
 } from "@bella-defintech/uniswap-v3-simulator";
 import {
   LookUpPeriod,
@@ -27,7 +28,7 @@ import { SwapEvent } from "@bella-defintech/uniswap-v3-simulator/dist/entity/Swa
 import { EventType } from "@bella-defintech/uniswap-v3-simulator/dist/enum/EventType";
 import { PoolEvent } from "./charm/types";
 import { AlphaProVault } from "./charm/alpha-pro-vault";
-import { add, cmp, div, sub } from "./utils";
+import { cmp } from "./utils";
 
 export interface Strategy {
   trigger: (
@@ -39,7 +40,6 @@ export interface Strategy {
   ) => Promise<boolean> | boolean;
   cache: (
     phase: Phase,
-    corePoolView: CorePoolView,
     variable: Map<string, any>
   ) => void;
   act: (
@@ -50,7 +50,7 @@ export interface Strategy {
     vault: AlphaProVault,
     variable: Map<string, any>
   ) => Promise<void>;
-  evaluate: (corePoolView: CorePoolView, variable: Map<string, any>, vault: AlphaProVault) => void;
+  evaluate: (variable: Map<string, any>, vault: AlphaProVault) => void;
   backtest: (startDate: Date, endDate: Date, lookupPeriod: LookUpPeriod) => Promise<void>;
   run: (dryrun: boolean) => Promise<void>;
   shutdown: () => Promise<void>;
@@ -69,7 +69,6 @@ export async function buildStrategy(
       ) => Promise<boolean> | boolean,
     cache: (
       phase: Phase,
-      corePoolView: CorePoolView,
       variable: Map<string, any>
     ) => void,
     act: (
@@ -80,7 +79,7 @@ export async function buildStrategy(
       vault: AlphaProVault,
       variable: Map<string, any>
     ) => Promise<void>,
-    evaluate: (corePoolView: CorePoolView, variable: Map<string, any>, vault: AlphaProVault) => void
+    evaluate: (variable: Map<string, any>, vault: AlphaProVault) => void
   ): Promise<Strategy> {
     let variable: Map<string, any> = new Map();
     /* 
@@ -141,7 +140,7 @@ export async function buildStrategy(
     let account: Account = await buildAccount(configurableCorePool.getCorePool())
 
     // This is an implementation of Engine interface based on the Tuner.
-    let engine = await buildDryRunEngine(account, configurableCorePool);
+    let engine = await buildDryRunEngine(configurableCorePool);
 
     // First vault deposit to which we compare strategy performance
     await initializeAccountVault(account, engine);
@@ -173,7 +172,10 @@ export async function buildStrategy(
             );
           } catch (burnError: any) {
             // Handle liquidity burn errors gracefully
-            if (burnError.message?.includes('NP') || burnError.message?.includes('Not Positive')) {
+            if (burnError.message?.includes('NP') || 
+                burnError.message?.includes('Not Positive') ||
+                burnError.message?.includes('Liquidity Underflow') ||
+                burnError.message?.includes('INVALID_TICK')) {
               console.warn(`Warning: Cannot burn ${event.liquidity.toString()} liquidity from position [${event.tickLower}, ${event.tickUpper}] for ${event.msgSender}. Position may have insufficient liquidity. Skipping event.`);
               // Skip this burn event and continue with simulation
             } else {
@@ -209,6 +211,51 @@ export async function buildStrategy(
                   }
                 }
 
+                const corePool = configurableCorePool.getCorePool();
+                if (JSBI.equal(corePool.sqrtPriceX96, (event as SwapEvent).sqrtPriceX96)) {
+                  // Event already applied; skip duplicate occurrence.
+                  break;
+                }
+
+                if (!sqrtPriceLimitX96) {
+                  const ONE = JSBI.BigInt(1);
+                  const minLimit = JSBI.add(TickMath.MIN_SQRT_RATIO, ONE);
+                  const maxLimit = JSBI.subtract(TickMath.MAX_SQRT_RATIO, ONE);
+                  if (zeroForOne) {
+                    const target = JSBI.greaterThan(event.sqrtPriceX96, minLimit)
+                      ? JSBI.subtract(event.sqrtPriceX96, ONE)
+                      : minLimit;
+                    sqrtPriceLimitX96 = JSBI.greaterThan(target, TickMath.MIN_SQRT_RATIO)
+                      ? target
+                      : minLimit;
+                  } else {
+                    const target = JSBI.lessThan(event.sqrtPriceX96, maxLimit)
+                      ? JSBI.add(event.sqrtPriceX96, ONE)
+                      : maxLimit;
+                    sqrtPriceLimitX96 = JSBI.lessThan(target, TickMath.MAX_SQRT_RATIO)
+                      ? target
+                      : maxLimit;
+                  }
+                }
+
+                const ONE = JSBI.BigInt(1);
+                const currentSqrt = corePool.sqrtPriceX96;
+                if (zeroForOne) {
+                  const minLimit = JSBI.add(TickMath.MIN_SQRT_RATIO, ONE);
+                  if (!JSBI.lessThan(sqrtPriceLimitX96, currentSqrt)) {
+                    sqrtPriceLimitX96 = JSBI.greaterThan(currentSqrt, minLimit)
+                      ? JSBI.subtract(currentSqrt, ONE)
+                      : minLimit;
+                  }
+                } else {
+                  const maxLimit = JSBI.subtract(TickMath.MAX_SQRT_RATIO, ONE);
+                  if (!JSBI.greaterThan(sqrtPriceLimitX96, currentSqrt)) {
+                    sqrtPriceLimitX96 = JSBI.lessThan(currentSqrt, maxLimit)
+                      ? JSBI.add(currentSqrt, ONE)
+                      : maxLimit;
+                  }
+                }
+
                 // Dry-run the swap to inspect expected effects without mutating state
                 try {
                   // const q = await configurableCorePool.querySwap(zeroForOne, amountSpecified, sqrtPriceLimitX96);
@@ -222,7 +269,7 @@ export async function buildStrategy(
                   // console.warn('querySwap failed:', _qe?.message ?? _qe);
                 }
 
-                await configurableCorePool.swap(zeroForOne, amountSpecified, sqrtPriceLimitX96);
+                await configurableCorePool.swap(zeroForOne, amountSpecified, undefined);
                 // const returnedSqrt = (res as any).sqrtPriceX96 ? (res as any).sqrtPriceX96.toString() : configurableCorePool.getCorePool().sqrtPriceX96.toString();
               } catch (err) {
                 console.error('swap/pipeline error:', err);
@@ -234,6 +281,25 @@ export async function buildStrategy(
           // @ts-ignore: ExhaustiveCheck
           const exhaustiveCheck: never = event;
       }
+    }
+
+    // WARMUP PHASE: Replay all events from pool creation to startDate to build accurate pool state
+    console.log('[WARMUP] Replaying events from pool creation to startDate to build initial pool state...');
+    // Use pool creation date - May 5, 2021 for both WETH-USDT and WBTC-USDC
+    const poolCreationDate = getDate(2021, 5, 5);
+    if (poolCreationDate < startDate) {
+      console.log(`[WARMUP] Pool created: ${fmtUTC(poolCreationDate)}, Backtest starts: ${fmtUTC(startDate)}`);
+      let warmupEventsCount = 0;
+      for await (const event of streamEventsByDate(poolCreationDate, startDate)) {
+        await replayEvent(event);
+        warmupEventsCount++;
+        if (warmupEventsCount % 10000 === 0) {
+          console.log(`[WARMUP] Replayed ${warmupEventsCount} events...`);
+        }
+      }
+      console.log(`[WARMUP] Completed. Replayed ${warmupEventsCount} total events. Pool state ready for backtest.`);
+    } else {
+      console.log('[WARMUP] Skipped - startDate equals or predates pool creation');
     }
 
     // replay event and call user custom strategy
@@ -250,7 +316,7 @@ export async function buildStrategy(
       variable.set(CommonVariables.DATE, currDate);
       console.log(currDate);
       // allow update custom cache no matter act is being triggered or not
-      cache(Phase.AFTER_NEW_TIME_PERIOD, configurableCorePool.getCorePool(), variable);
+      cache(Phase.AFTER_NEW_TIME_PERIOD, variable);
       // decide whether to do action
       // DLV Rebalance
       if (
@@ -302,7 +368,7 @@ export async function buildStrategy(
         variable.set(CommonVariables.PRICE, corePoolView.sqrtPriceX96);
         variable.set(CommonVariables.TICK, corePoolView.tickCurrent);
       
-        cache(Phase.AFTER_EVENT_APPLIED, corePoolView, variable);
+        cache(Phase.AFTER_EVENT_APPLIED, variable);
       
         if (await trigger(Phase.AFTER_EVENT_APPLIED, Rebalance.DLV, corePoolView, account.vault, variable)) {
           await act(Phase.AFTER_EVENT_APPLIED, Rebalance.DLV, engine, corePoolView, account.vault, variable);
@@ -316,7 +382,7 @@ export async function buildStrategy(
     // shutdown environment
     await clientInstance.shutdown();
     // evaluate results
-    evaluate(configurableCorePool.getCorePool(), variable, account.vault);
+    evaluate(variable, account.vault);
   }
 
   async function run(_dryrun: boolean) {

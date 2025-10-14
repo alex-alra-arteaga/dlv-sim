@@ -1,11 +1,7 @@
-import assert from "assert";
 import JSBI from "jsbi";
 import {
   ConfigurableCorePool,
-  isPositive,
-  toBN,
 } from "@bella-defintech/uniswap-v3-simulator";
-import { Account } from "./account";
 
 export interface Engine {
   mint(
@@ -38,7 +34,6 @@ export interface Engine {
 }
 
 export async function buildDryRunEngine(
-  account: Account,
   configurableCorePool: ConfigurableCorePool
 ): Promise<Engine> {
   function mint(

@@ -6,6 +6,7 @@ import Decimal from "decimal.js-light";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import customParse from "dayjs/plugin/customParseFormat.js";
+import "../config";
 import { getCurrentPoolConfig } from "../src/pool-config";
 import { TickMath, FullMath } from "@bella-defintech/uniswap-v3-simulator";
 import JSBI from "jsbi";
@@ -38,7 +39,7 @@ const CONFIG = {
   poolDisplayName: poolConfig.getDisplayName(),
 
   // fixed end date (inclusive)
-  endDateUtc: dayjs.utc("2024-12-15").endOf("day").valueOf(),
+  endDateUtc: dayjs.utc(poolConfig.getEndDate()).endOf("day").valueOf(),
 
   // date parsing formats used by DB 'date' column
   dateFormats: [
@@ -625,7 +626,6 @@ async function main() {
 
 function openInBrowser(filePath: string) {
   const abs = path.resolve(filePath);
-  const url = `file://${abs}`;
   const platform = process.platform;
   let cmd: string, args: string[];
 

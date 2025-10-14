@@ -2,20 +2,16 @@ import JSBI from "jsbi";
 import {
   CorePoolView,
   EventDBManager,
-  getDate,
-  mul10pow,
-  get10pow,
-  toJSBI,
 } from "@bella-defintech/uniswap-v3-simulator";
-import { mul, safeToBN } from "../src/utils";
+import { safeToBN } from "../src/utils";
 import { BigNumber as BN } from "ethers";
-import { buildStrategy, CommonVariables, Phase, Rebalance } from "../src/strategy.ts";
-import { Engine } from "../src/engine.ts";
-import { MaxUint128, TARGET_CR, ZERO } from "../src/internal_constants.ts";
-import { LogDBManager } from "./LogDBManager.ts";
-import { charmConfig, dlvConfig, configLookUpPeriod } from "../config.ts";
-import { AlphaProVault } from "../src/charm/alpha-pro-vault.ts";
-import { getCurrentPoolConfig } from "../src/pool-config";
+import { buildStrategy, CommonVariables, Phase, Rebalance } from "../src/strategy";
+import { Engine } from "../src/engine";
+import { MaxUint128, TARGET_CR } from "../src/internal_constants";
+import { LogDBManager } from "./LogDBManager";
+import { charmConfig, dlvConfig, configLookUpPeriod } from "../config";
+import { AlphaProVault } from "../src/charm/alpha-pro-vault";
+import { getCurrentPoolConfig, PoolConfigManager } from "../src/pool-config";
 
 export interface RebalanceLog {
   wide0: number;
@@ -65,7 +61,7 @@ function calculateAPY(data: Array<{t: number, vaultValue: number, price: number}
 }
 
 describe("DLV Strategy", function () {
-  let poolConfig: any;
+  let poolConfig: PoolConfigManager;
   let eventDBManagerPath: string;
   let rebalanceLogDBManagerPath: string;
   let logDB: LogDBManager;
@@ -112,8 +108,9 @@ describe("DLV Strategy", function () {
     let charmRebalancePeriod = charmConfig.period / configLookUpPeriod;
     let dlvRebalancePeriod = dlvConfig.period ? dlvConfig.period / configLookUpPeriod : Number(MaxUint128);
 
-    let startDate = getDate(2021, 5, 6);
-    let endDate = getDate(2024, 12, 15);
+    let startDate = poolConfig.getStartDate();
+    let endDate = poolConfig.getEndDate();
+    console.log('Start date:', startDate, 'End date:', endDate);
 
     // // For brute-force testing, use shorter period to speed up execution
     // if (process.env.BRUTE_FORCE === 'true') {
@@ -150,7 +147,6 @@ describe("DLV Strategy", function () {
 
     let cache = function (
       phase: Phase,
-      corePoolView: CorePoolView,
       variable: Map<string, any>
     ) {
       switch (phase) {
@@ -352,7 +348,6 @@ const act = async function (
 };
 
     let evaluate = async function (
-      corePoolView: CorePoolView,
       variable: Map<string, any>,
       vault: AlphaProVault
     ) {
