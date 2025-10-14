@@ -148,3 +148,7 @@ mochawesome-report/
 *.db
 *.html
 *.jsonl
+
+# any __pycache__ or .venv folders anywhere in the repo
+**/__pycache__/
+**/.venv/
