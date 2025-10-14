@@ -1,0 +1,41 @@
+The model assumes the following configuration:
+The user specifies top_leverage and bottom_leverage — the boundaries within which the bot should maintain leverage (typically with a width top_leverage - bottom_leverage ≈ 0.1–0.4), and provides the collateral. The collateral is represented by the LP token (island token), and the debt corresponds to the stablecoin used to purchase the volatile token. Here next definitions are used:
+
+commulative_lp - the LP token amount borrowed for looped leverage
+commulative_debt - the corresponding debt in stablecoins
+noncommulative_debt - the non-looped debt in stablecoins 
+c = the calm part of the LP token (the fraction of the LP token price that corresponds to the stablecoin component)
+
+x = vol_token_value/collateral_value
+y = commulative_lp_value/collateral_value
+leverage = x/c + y + 1
+cr (collateralization ratio) = (collateral_value + commulative_lp_value)/(commulative_debt + noncommulative_debt)
+
+Bot expects next input vector:
+
+[
+leverage_normed,
+cr_normed,
+leverage_mean_normed,
+leverage_gain_mean_normed,
+vol_token_normed, # the same as x
+vol_token_mean, # mean value of x over horizon
+vol_token_gain_mean_normed, # normalized slope of x over horizon
+current_calm_part, # the same as c
+calm_part_mean, # mean value of с over horizon
+calm_part_gain_mean_normed # normalized slope of с over horizon
+]
+
+where leverage and mean_leverage are normed as follows: (leverage - bottom_leveraage)/(top_leverage - bottom_leveraage); cr_normed = 1/cr; gains are normalized as the slope (obtained via the least squares method over the horizon) and transformed using: 
+
+def _normalize_slope(self, slope):
+	alpha = math.atan(8000*slope)
+        return (2/math.pi*alpha + 1)/2
+
+The bot performs only rebalancing operations. It is assumed that the vault maintains the loop (commulative_lp and commulative_debt) such that the maximum leverage that prevents liquidation remains higher than top_leverage.
+
+Bot outputs follows:
+0 - do nothing
+1 - rebalance to target_leverage = 1/2*(top_leverage + bottom_leverage)
+2 - rebalance to top_target_leverage = 1/2*(top_leverage + target_leverage) 
+3 - rebalance to bottom_target_leverage = 1/2*(bottom_leverage + target_leverage)
