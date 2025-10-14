@@ -265,9 +265,9 @@ export const ETH_USDT_CONFIG: PoolConfig = {
   },
   volatileToken: 'token0', // WETH is volatile
   stableToken: 'token1',   // USDT is stable
-  dbPath: "data/WETH-USDT_0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36.db",
+  dbPath: "data/ETH-USDT_0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36.db",
   rebalanceLogDbPath: "rebalance_log_usdt_weth_500.db",
-  displayName: "WETH-USDT 0.05%",
+  displayName: "ETH-USDT 0.05%",
   startDate: getDate(2021, 5, 9),  // Warmup phase will replay events from May 5 to May 9
   endDate: getDate(2024, 3, 13)     // Use Sept 5, 2024 for consistency
 };
