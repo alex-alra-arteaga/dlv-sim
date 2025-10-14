@@ -39,7 +39,7 @@ const CONFIG = {
   poolDisplayName: poolConfig.getDisplayName(),
 
   // fixed end date (inclusive)
-  endDateUtc: dayjs.utc(poolConfig.getEndDate()).endOf("day").valueOf(),
+  endDateUtc: dayjs.utc("2024-12-15").endOf("day").valueOf(),
 
   // date parsing formats used by DB 'date' column
   dateFormats: [

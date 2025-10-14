@@ -208,15 +208,6 @@ export class PoolConfigManager {
     const fractionalPart = remainder.toString().padStart(decimals, '0');
     return `${wholePart.toString()}.${fractionalPart} ${this.getStableSymbol()}`;
   }
-  
-  // Date range getters
-  getStartDate(): Date {
-    return this.config.startDate;
-  }
-  
-  getEndDate(): Date {
-    return this.config.endDate;
-  }
 }
 
 // Pre-configured pool configurations
@@ -239,9 +230,7 @@ export const WBTC_USDC_CONFIG: PoolConfig = {
   stableToken: 'token1',   // USDC is stable
   dbPath: "data/WBTC-USDC_0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35.db",
   rebalanceLogDbPath: "rebalance_log_usdc_wbtc_3000.db",
-  displayName: "WBTC-USDC 0.3%",
-  startDate: getDate(2021, 5, 6),  // Pool started May 5, 2021, but use May 9 for clean start
-  endDate: getDate(2024, 12, 15)     // Use Sept 5, 2024 for consistency
+  displayName: "WBTC-USDC 0.3%"
 };
 
 export const ETH_USDT_CONFIG: PoolConfig = {
@@ -263,9 +252,7 @@ export const ETH_USDT_CONFIG: PoolConfig = {
   stableToken: 'token1',   // USDT is stable
   dbPath: "data/ETH-USDT_0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36.db",
   rebalanceLogDbPath: "rebalance_log_usdt_weth_500.db",
-  displayName: "ETH-USDT 0.05%",
-  startDate: getDate(2021, 5, 9),  // Warmup phase will replay events from May 5 to May 9
-  endDate: getDate(2024, 3, 13)     // Use Sept 5, 2024 for consistency
+  displayName: "WETH-USDT 0.3%"
 };
 
 // Global pool configuration instance
@@ -290,9 +277,7 @@ export function createPoolConfig(
   token0: TokenConfig,
   token1: TokenConfig,
   volatileToken: 'token0' | 'token1',
-  dbPathSuffix?: string,
-  startDate?: Date,
-  endDate?: Date
+  dbPathSuffix?: string
 ): PoolConfig {
   const stableToken = volatileToken === 'token0' ? 'token1' : 'token0';
   const vol = volatileToken === 'token0' ? token0 : token1;
@@ -312,8 +297,6 @@ export function createPoolConfig(
     stableToken,
     dbPath: `data/${defaultDbPath}`,
     rebalanceLogDbPath: defaultRebalanceDbPath,
-    displayName: `${vol.symbol}-${stable.symbol} ${(feeAmount/10000).toFixed(2)}%`,
-    startDate: startDate || getDate(2021, 5, 9),
-    endDate: endDate || getDate(2024, 9, 5)
+    displayName: `${vol.symbol}-${stable.symbol} ${(feeAmount/10000).toFixed(2)}%`
   };
 }

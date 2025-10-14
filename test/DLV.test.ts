@@ -12,7 +12,7 @@ import { MaxUint128 } from "../src/internal_constants.ts";
 import { LogDBManager } from "./LogDBManager.ts";
 import { charmConfig, dlvConfig, configLookUpPeriod, isDebtNeuralRebalancing, targetCR, setTargetCR, debtAgentConfig } from "../config.ts";
 import { AlphaProVault } from "../src/charm/alpha-pro-vault.ts";
-import { getCurrentPoolConfig } from "../src/pool-config";
+import { getCurrentPoolConfig, PoolConfigManager } from "../src/pool-config";
 import { DebtNeuralAgent } from "../src/neural-agent/debt-neural-agent.ts";
 
 export interface RebalanceLog {
@@ -111,9 +111,8 @@ describe("DLV Strategy", function () {
     let charmRebalancePeriod = charmConfig.period / configLookUpPeriod;
     let dlvRebalancePeriod = dlvConfig.period ? dlvConfig.period / configLookUpPeriod : Number(MaxUint128);
 
-    let startDate = poolConfig.getStartDate();
-    let endDate = poolConfig.getEndDate();
-    console.log('Start date:', startDate, 'End date:', endDate);
+    let startDate = getDate(2021, 5, 6);
+    let endDate = getDate(2024, 12, 15);
 
     // // For brute-force testing, use shorter period to speed up execution
     // if (process.env.BRUTE_FORCE === 'true') {
@@ -159,6 +158,7 @@ describe("DLV Strategy", function () {
 
     let cache = function (
       phase: Phase,
+      corePoolView: CorePoolView,
       variable: Map<string, any>
     ) {
       switch (phase) {
@@ -361,6 +361,7 @@ const act = async function (
 };
 
     let evaluate = async function (
+      corePoolView: CorePoolView,
       variable: Map<string, any>,
       vault: AlphaProVault
     ) {
