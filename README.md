@@ -1,6 +1,6 @@
 # DLV-Sim
 
-DLV-Sim is a simulation tool for modeling custom Uniswap V3 strategies. You can plug different automated liquidity management (ALM), representd by 'accounts'.
+DLV-Sim is a simulation tool for modeling custom Uniswap V3 strategies. You can plug different automated liquidity management (ALM), represented by 'accounts'.
 It allows users to simulate complex strategies against historical behaviour of any Uniswap V3 pool.
 
 This specific  simulation mocks a Charm Vault being used as collateral, targeting a CR equivalent to 2x leverage and a 50:50 LP ratio via Charm passive rebalancing.
@@ -23,50 +23,65 @@ It offers unparalled speed, you can run 5 years data, recreating swaps|mints|bur
 
 3. Set up environment variables (e.g., for RPC endpoints) in a `.env` file.
 
+4. In case you don't have pytorch, open a second terminal and run:
+```bash
+# 0. open venv
+cd agents/debt
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 1. make sure pip resolves to the venv (either unalias or call the full path)
+unalias pip 2>/dev/null || true
+
+# 2. install torch into the venv
+pip install --upgrade pip
+# For Apple Silicon CPU-only build
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# 3. verify from the same shell
+python -c "import torch; print(torch.__version__)"
+```
+
+5. Back in the first terminal:
+```bash
+export BF_DEBT_AGENT_JSON='{"pythonExecutable":"'"$PWD"'/agents/debt/.venv/bin/python"}'
+```
+
 ## Usage
 
-Run the simulation:
+Run a simulation based on `config.ts`, for detailed information check [Configuration](#configuration):
 ```bash
 yarn simulate
 ```
 
-## Docker
-
-You can run the full toolchain inside a Linux container so it behaves the same on EC2 and macOS.
-
-### Build the image
-
+Run a combination of simulations concurrently with different configurations:
 ```bash
-docker build -t dlv-sim .
+yarn build:scripts
+# Defaults to standard level
+yarn brute-force
+# or with custom simple flags
+yarn brute-force:light
 ```
 
-The image defaults to Node.js 23 to mirror the macOS setup. If you need a different release, pass `--build-arg NODE_VERSION=20-bookworm` (for example).
+You can customize the brute-force sweep with the following flags:
 
-### Run commands inside the container
+- `--level <air|light|standard|heavy|extreme>`: Chooses how wide the parameter grid is. Higher levels explore more Charm/DLV combinations (and therefore take longer).
+- `--concurrency <n>`: Overrides the number of worker processes that run backtests in parallel. By default it uses `min(4, CPU cores - 1)`.
+- `--runs <n>`: Caps the total number of parameter combinations executed. Use `0` (default) for all combinations produced by the selected level.
+- `--heapMB <n>`: Sets the Node.js heap size (in megabytes) for each worker. Defaults to `18192`, but you can lower it to fit smaller machines.
 
-The default command executes the test suite:
-
+Example for MacBook Pro M3 with 18GB RAM:
 ```bash
-docker run --rm -it \
-    --env-file .env \
-    -v $(pwd)/data:/app/data \
-    dlv-sim
+node dist/scripts/brute-force.js --prebuilt --buildDir dist --level light --tickSpacing 60 --runs 0 --mochaSpec dist/test/DLV.test.js --concurrency 9 --heapMB 2048 --listOnce false --reporter min --seed 42
 ```
 
-- Mount the `data/` directory to reuse your local SQLite datasets without baking them into the image.
-- Provide environment variables (e.g. RPC credentials) through `--env-file` or `-e` flags.
+At the end, both `yarn simulate` and `yarn brute-force` will output results in the `results` folder and will open a browser window with plots.
+The first one individualized, the second one a summary of all the runs and lots of comparison plots for advanced analysis.
 
-Override the command to run other workflows, such as the brute-force search:
-
+The command to plot the existing results is:
 ```bash
-docker run --rm -it \
-    --env-file .env \
-    -v $(pwd)/data:/app/data \
-    dlv-sim \
-    yarn brute-force:light --heapMB 1024 --concurrency 9 --runs 0 --reporter min --seed 42
+npx tsx scripts/plot-brute-force.ts
 ```
-
-For long-running jobs on EC2, you can add `-d` (detached) and redirect output to a log file or use the instance's process manager as needed.
 
 ## Configuration
 
@@ -91,6 +106,53 @@ yarn run update
 ```
 
 At the end, move the database file from the source to the `data` folder.
+
+## Configuration
+
+Under `config.ts` you can set the type of pool you desire:
+
+- **PoolConfig**
+    - The repo comes with WBTC-USDC 0.3%, you can download any by going down to [Data Gathering](#data-gathering) and following instructions.
+        - You will still have to set the pool information in `src/pool-config.ts`.
+
+- **configLookUpPeriod**
+    - You can choose between `MINUTELY`, `HOURLY`, `FOUR_HOURLY` and `DAILY` data. It defines the simulations steps (how often ALM and debt rebalancing are considered).
+
+- **isDebtNeuralRebalancing**
+    - Whether we want to use the neural network (sitting in `agents/debt`) to rebalance debt or a mechanical strategy.
+
+- **targetCR**
+    - The target CR we want to maintain, if using neural rebalancing this will vary per rebalance, but we always try to target 2x so that if the pool ratio is 50:50, we don't need to swap assets.
+
+Below are only relevant if `isDebtNeuralRebalancing` is `true`.
+- **topLeverage**
+    - The maximum leverage we want to allow, the agent will try to stay below this value.
+- **bottomLeverage**
+    - The minimum leverage we want to allow, the agent will try to stay above this value
+- **horizonSeconds**
+    - The number of seconds in the future we want the agent to have observations over for internal inputs (vol_token_mean, vol_token_gain_mean_normed, calm_part_gain_mean_normed)
+
+Charm (ALM solution) parameters:
+- **wideRangeWeight**
+    - The weight of the wide range liquidity band position, 1e6 is 100%.
+- **wideThreshold**
+    - The threshold (in ticks) from the current price to place the wide range position.
+- **baseThreshold**
+    - The threshold (in ticks) from the current price to place the base range position.
+- **limitThreshold**
+    - The threshold (in ticks) from the current price to place the limit range position.
+- **period**
+    - The number of seconds between each ALM rebalance.
+
+DLV config (only relevant if `isDebtNeuralRebalancing` is `false`):
+- **period**
+    - The number of seconds between each DLV rebalance.
+- **deviationThresholdAbove**
+    - The threshold above the target CR to trigger a rebalance, in percentage from 0 to 1.
+- **deviationThresholdBelow**
+    - The threshold below the target CR to trigger a rebalance, in percentage from 0 to 1.
+- **debtToVolatileSwapFee**
+    - Swap cost (fee + slippage) to consider when swapping debt to volatile asset or viceversa inside a debt releveraging, in percentage from 0 to 1.
 
 # Future features
 
