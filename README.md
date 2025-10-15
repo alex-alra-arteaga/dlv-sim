@@ -154,6 +154,21 @@ DLV config (only relevant if `isDebtNeuralRebalancing` is `false`):
 - **debtToVolatileSwapFee**
     - Swap cost (fee + slippage) to consider when swapping debt to volatile asset or viceversa inside a debt releveraging, in percentage from 0 to 1.
 
+# Brute force Comparison
+
+To compare between brute-force runs with underlying changes, for example between neural agent versions, and against a mechnical strategy, run a brute-force with **isDebtNeuralRebalancing** set to `true` and `false` respectively.
+
+Once you do a run, change the name of the output file to `brute-force-results_ai_disabled.jsonl` or `brute-force-results_ai_enabled.jsonl`, respectively, and run the plotter:
+
+```bash
+# If they don't match in length, you can subset the larger one to the smaller one
+# For example, if ai_enabled has 359 runs and ai_disabled has 300 runs:
+head -n 300 brute-force-results_ai_disabled.jsonl > brute-force-results_ai_disabled_subset.jsonl
+
+# And finally
+python3 scripts/helper/brute-force-comparison/analyze_results.py
+```
+
 # Future features
 
 - Borrow Interest

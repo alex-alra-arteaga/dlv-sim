@@ -7,7 +7,7 @@ import { setCurrentPoolConfig, WBTC_USDC_CONFIG } from "./src/pool-config";
 setCurrentPoolConfig(WBTC_USDC_CONFIG);
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
-export const isDebtNeuralRebalancing = false; // Whether to enable debt neutral rebalancing
+export const isDebtNeuralRebalancing = true; // Whether to enable debt neutral rebalancing
 export let targetCR = JSBI.BigInt(2e18); // 200% in WAD
 
 export function setTargetCR(value: JSBI) {
