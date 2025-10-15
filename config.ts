@@ -7,7 +7,7 @@ import { setCurrentPoolConfig, WBTC_USDC_CONFIG } from "./src/pool-config";
 setCurrentPoolConfig(WBTC_USDC_CONFIG);
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
-export const isDebtNeuralRebalancing = true; // Whether to enable debt neutral rebalancing
+export const isDebtNeuralRebalancing = false; // Whether to enable debt neutral rebalancing
 export let targetCR = JSBI.BigInt(2e18); // 200% in WAD
 
 export function setTargetCR(value: JSBI) {
@@ -18,15 +18,20 @@ export type DebtAgentConfig = {
   topLeverage: number;
   bottomLeverage: number;
   horizonSeconds: number;
+  pythonExecutable?: string;
+  inferencePath?: string;
 };
 
 export const debtAgentConfig: DebtAgentConfig = (() => {
   const override = parseEnvJSON<DebtAgentConfig>("BF_DEBT_AGENT_JSON");
   if (override) return override;
+  const baseDir = process.cwd();
   return {
     topLeverage: 2.2,
     bottomLeverage: 1.8,
     horizonSeconds: 600,
+    pythonExecutable: `${baseDir}/agents/debt/.venv/bin/python`,
+    inferencePath: `${baseDir}/agents/debt/inference.py`,
   } satisfies DebtAgentConfig;
 })();
 

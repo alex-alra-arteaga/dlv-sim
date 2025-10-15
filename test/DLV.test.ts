@@ -1,19 +1,18 @@
 import JSBI from "jsbi";
 import {
-  CorePoolView,
   EventDBManager,
   getDate
 } from "@bella-defintech/uniswap-v3-simulator";
-import { mul, safeToBN } from "../src/utils";
+import { safeToBN } from "../src/utils";
 import { BigNumber as BN } from "ethers";
-import { buildStrategy, CommonVariables, Phase, Rebalance } from "../src/strategy.ts";
-import { Engine } from "../src/engine.ts";
-import { MaxUint128 } from "../src/internal_constants.ts";
-import { LogDBManager } from "./LogDBManager.ts";
-import { charmConfig, dlvConfig, configLookUpPeriod, isDebtNeuralRebalancing, targetCR, setTargetCR, debtAgentConfig } from "../config.ts";
-import { AlphaProVault } from "../src/charm/alpha-pro-vault.ts";
+import { buildStrategy, CommonVariables, Phase, Rebalance } from "../src/strategy";
+import { Engine } from "../src/engine";
+import { MaxUint128 } from "../src/internal_constants";
+import { LogDBManager } from "./LogDBManager";
+import { charmConfig, dlvConfig, configLookUpPeriod, isDebtNeuralRebalancing, targetCR, setTargetCR, debtAgentConfig } from "../config";
+import { AlphaProVault } from "../src/charm/alpha-pro-vault";
 import { getCurrentPoolConfig, PoolConfigManager } from "../src/pool-config";
-import { DebtNeuralAgent } from "../src/neural-agent/debt-neural-agent.ts";
+import { DebtNeuralAgent } from "../src/neural-agent/debt-neural-agent";
 
 export interface RebalanceLog {
   wide0: number;
@@ -122,14 +121,12 @@ describe("DLV Strategy", function () {
     let trigger = async function (
       phase: Phase,
       rebalance: Rebalance,
-      _corePoolView: CorePoolView,
       vault: AlphaProVault,
       variable: Map<string, any>
     ) {
       switch (phase) {
         case Phase.AFTER_NEW_TIME_PERIOD: {
           const count = (variable.get(TICK_COUNT) as number) ?? 0;
-          console.log('Volatile price: ', vault.poolPrice(_corePoolView.sqrtPriceX96).toString());
 
           if (rebalance === Rebalance.ALM) {
             return count % charmRebalancePeriod === 0;
@@ -158,7 +155,6 @@ describe("DLV Strategy", function () {
 
     let cache = function (
       phase: Phase,
-      corePoolView: CorePoolView,
       variable: Map<string, any>
     ) {
       switch (phase) {
@@ -187,7 +183,6 @@ const act = async function (
   phase: Phase,
   rebalance: Rebalance,
   engine: Engine,
-  _corePoolView: CorePoolView,
   vault: AlphaProVault,
   variable: Map<string, any>
 ): Promise<void> {
@@ -361,7 +356,6 @@ const act = async function (
 };
 
     let evaluate = async function (
-      corePoolView: CorePoolView,
       variable: Map<string, any>,
       vault: AlphaProVault
     ) {

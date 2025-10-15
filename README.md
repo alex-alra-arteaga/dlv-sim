@@ -72,7 +72,7 @@ You can customize the brute-force sweep with the following flags:
 
 Example for MacBook Pro M3 with 18GB RAM:
 ```bash
-node dist/scripts/brute-force.js --prebuilt --buildDir dist --level light --tickSpacing 60 --runs 0 --mochaSpec dist/test/DLV.test.js --concurrency 9 --heapMB 2048 --listOnce false --reporter min --seed 42
+node dist/scripts/brute-force.js --prebuilt --buildDir dist --level light --tickSpacing 60 --runs 0 --mochaSpec dist/test/DLV.test.js --concurrency 9 --heapMB 2048 --listOnce false --reporter min
 ```
 
 At the end, both `yarn simulate` and `yarn brute-force` will output results in the `results` folder and will open a browser window with plots.

@@ -37,7 +37,6 @@ for (let i = 0; i < argv.length; i++) {
 const LEVEL: Level = (args.level ?? "standard") as Level;
 const TICK_SPACING = Number(args.tickSpacing ?? 60);
 const POOL_FEE_TIER = Number(args.feeTierBps ?? 30); // just metadata for report
-const SEED = String(args.seed ?? "42");
 const RUNS_CAP = Number(args.runs ?? 0); // 0 = no cap
 const HEAP_MB = Number(args.heapMB ?? 18192);
 const PROJECT_ROOT = process.cwd();
@@ -220,9 +219,9 @@ function grids(level: Level) {
 }
 
 // ---- runner ----
-function runOnce(charm: Charm, dlv: DLV): Promise<{ ok: boolean; apy?: any; stdout?: string; stderr?: string }> {
-  console.log(`[BRUTE-FORCE] Starting run with charm config:`, JSON.stringify(charm));
-  console.log(`[BRUTE-FORCE] DLV config:`, JSON.stringify(dlv));
+function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolean; apy?: any; stdout?: string; stderr?: string }> {
+  console.log(`[BRUTE-FORCE] [W${workerId}] Starting run with charm config:`, JSON.stringify(charm));
+  console.log(`[BRUTE-FORCE] [W${workerId}] DLV config:`, JSON.stringify(dlv));
 
   const mochaCmd = [
     "node",
@@ -232,7 +231,12 @@ function runOnce(charm: Charm, dlv: DLV): Promise<{ ok: boolean; apy?: any; stdo
     "./node_modules/mocha/bin/mocha",
     "--extension", "ts",
   ];
-  console.log(`[BRUTE-FORCE] Running mocha command: ${mochaCmd.join(' ')}`);
+  console.log(`[BRUTE-FORCE] [W${workerId}] Running mocha command: ${mochaCmd.join(' ')}`);
+
+  // Setup worker-specific Python virtual environment
+  const baseDir = PROJECT_ROOT;
+  const workerVenvPath = path.join(baseDir, "agents", "debt", `.venv-${workerId}`, "bin", "python");
+  const inferencePath = path.join(baseDir, "agents", "debt", "inference.py");
 
   const env = {
     ...process.env,
@@ -249,6 +253,13 @@ function runOnce(charm: Charm, dlv: DLV): Promise<{ ok: boolean; apy?: any; stdo
       deviationThresholdAbove: dlv.deviationThresholdAbove,
       deviationThresholdBelow: dlv.deviationThresholdBelow,
       debtToVolatileSwapFee: dlv.debtToVolatileSwapFee,
+    }),
+    BF_DEBT_AGENT_JSON: JSON.stringify({
+      topLeverage: 2.2,
+      bottomLeverage: 1.8,
+      horizonSeconds: 600,
+      pythonExecutable: workerVenvPath,
+      inferencePath: inferencePath,
     }),
   } as NodeJS.ProcessEnv;
 
@@ -345,7 +356,7 @@ function runOnce(charm: Charm, dlv: DLV): Promise<{ ok: boolean; apy?: any; stdo
       const key = crypto.createHash("sha1").update(JSON.stringify({ c, d })).digest("hex").slice(0, 12);
       console.log(`[BRUTE-FORCE PROGRESS] [W${wid}] Starting run ${runCount + 1}/${indices.length} key=${key}`);
       const started = Date.now();
-      const res = await runOnce(c, d);
+      const res = await runOnce(c, d, wid);
       const ms = Date.now() - started;
 
       const row = {

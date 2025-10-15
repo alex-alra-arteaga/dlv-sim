@@ -3,7 +3,6 @@ import { Account, buildAccount, initializeAccountVault } from "./account";
 import JSBI from "jsbi";
 import {
   ConfigurableCorePool,
-  CorePoolView,
   EventDBManager,
   SimulationDataManager,
   SimulatorClient,
@@ -32,24 +31,21 @@ export interface Strategy {
   trigger: (
     phase: Phase,
     rebalance: Rebalance,
-    corePoolView: CorePoolView,
     vault: AlphaProVault,
     variable: Map<string, any>
   ) => Promise<boolean> | boolean;
   cache: (
     phase: Phase,
-    corePoolView: CorePoolView,
     variable: Map<string, any>
   ) => void;
   act: (
     phase: Phase,
     rebalance: Rebalance,
     engine: Engine,
-    corePoolView: CorePoolView,
     vault: AlphaProVault,
     variable: Map<string, any>
   ) => Promise<void>;
-  evaluate: (corePoolView: CorePoolView, variable: Map<string, any>, vault: AlphaProVault) => void;
+  evaluate: (variable: Map<string, any>, vault: AlphaProVault) => void;
   backtest: (startDate: Date, endDate: Date, lookupPeriod: LookUpPeriod) => Promise<void>;
   run: (dryrun: boolean) => Promise<void>;
   shutdown: () => Promise<void>;
@@ -62,24 +58,21 @@ export async function buildStrategy(
     trigger: (
       phase: Phase,
       rebalance: Rebalance,
-      corePoolView: CorePoolView,
       vault: AlphaProVault,
       variable: Map<string, any>
       ) => Promise<boolean> | boolean,
     cache: (
       phase: Phase,
-      corePoolView: CorePoolView,
       variable: Map<string, any>
     ) => void,
     act: (
       phase: Phase,
       rebalance: Rebalance,
       engine: Engine,
-      corePoolView: CorePoolView,
       vault: AlphaProVault,
       variable: Map<string, any>
     ) => Promise<void>,
-    evaluate: (corePoolView: CorePoolView, variable: Map<string, any>, vault: AlphaProVault) => void
+    evaluate: (variable: Map<string, any>, vault: AlphaProVault) => void
   ): Promise<Strategy> {
     let variable: Map<string, any> = new Map();
     /* 
@@ -140,7 +133,7 @@ export async function buildStrategy(
     let account: Account = await buildAccount(configurableCorePool.getCorePool())
 
     // This is an implementation of Engine interface based on the Tuner.
-    let engine = await buildDryRunEngine(account, configurableCorePool);
+    let engine = await buildDryRunEngine(configurableCorePool);
 
     // First vault deposit to which we compare strategy performance
     await initializeAccountVault(account, engine);
@@ -249,14 +242,13 @@ export async function buildStrategy(
       variable.set(CommonVariables.DATE, currDate);
       console.log(currDate);
       // allow update custom cache no matter act is being triggered or not
-      cache(Phase.AFTER_NEW_TIME_PERIOD, configurableCorePool.getCorePool(), variable);
+      cache(Phase.AFTER_NEW_TIME_PERIOD, variable);
       // decide whether to do action
       // DLV Rebalance
       if (
         await trigger(
           Phase.AFTER_NEW_TIME_PERIOD,
           Rebalance.DLV,
-          configurableCorePool.getCorePool(),
           account.vault,
           variable
         )
@@ -265,7 +257,6 @@ export async function buildStrategy(
           Phase.AFTER_NEW_TIME_PERIOD,
           Rebalance.DLV,
           engine,
-          configurableCorePool.getCorePool(),
           account.vault,
           variable
         );
@@ -275,7 +266,6 @@ export async function buildStrategy(
         await trigger(
           Phase.AFTER_NEW_TIME_PERIOD,
           Rebalance.ALM,
-          configurableCorePool.getCorePool(),
           account.vault,
           variable
         )
@@ -284,7 +274,6 @@ export async function buildStrategy(
           Phase.AFTER_NEW_TIME_PERIOD,
           Rebalance.ALM,
           engine,
-          configurableCorePool.getCorePool(),
           account.vault,
           variable
         );
@@ -301,13 +290,13 @@ export async function buildStrategy(
         variable.set(CommonVariables.PRICE, corePoolView.sqrtPriceX96);
         variable.set(CommonVariables.TICK, corePoolView.tickCurrent);
       
-        cache(Phase.AFTER_EVENT_APPLIED, corePoolView, variable);
-      
-        if (await trigger(Phase.AFTER_EVENT_APPLIED, Rebalance.DLV, corePoolView, account.vault, variable)) {
-          await act(Phase.AFTER_EVENT_APPLIED, Rebalance.DLV, engine, corePoolView, account.vault, variable);
+        cache(Phase.AFTER_EVENT_APPLIED, variable);
+
+        if (await trigger(Phase.AFTER_EVENT_APPLIED, Rebalance.DLV, account.vault, variable)) {
+          await act(Phase.AFTER_EVENT_APPLIED, Rebalance.DLV, engine, account.vault, variable);
         }
-        if (await trigger(Phase.AFTER_EVENT_APPLIED, Rebalance.ALM, corePoolView, account.vault, variable)) {
-          await act(Phase.AFTER_EVENT_APPLIED, Rebalance.ALM, engine, corePoolView, account.vault, variable);
+        if (await trigger(Phase.AFTER_EVENT_APPLIED, Rebalance.ALM, account.vault, variable)) {
+          await act(Phase.AFTER_EVENT_APPLIED, Rebalance.ALM, engine, account.vault, variable);
         }
       }
       currDate = getNextTime(currDate);
@@ -315,7 +304,7 @@ export async function buildStrategy(
     // shutdown environment
     await clientInstance.shutdown();
     // evaluate results
-    evaluate(configurableCorePool.getCorePool(), variable, account.vault);
+    evaluate(variable, account.vault);
   }
 
   async function run(_dryrun: boolean) {
