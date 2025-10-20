@@ -265,12 +265,36 @@ export const ETH_USDT_CONFIG: PoolConfig = {
   },
   volatileToken: 'token0', // WETH is volatile
   stableToken: 'token1',   // USDT is stable
-  dbPath: "data/ETH-USDT_0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36.db",
+  dbPath: "data/WETH-USDT_0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36.db",
   rebalanceLogDbPath: "rebalance_log_usdt_weth_500.db",
   displayName: "ETH-USDT 0.05%",
   startDate: getDate(2021, 5, 9),  // Warmup phase will replay events from May 5 to May 9
   endDate: getDate(2024, 3, 13)     // Use Sept 5, 2024 for consistency
 };
+
+export const USDC_ETH_CONFIG: PoolConfig = {
+  poolAddress: "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+  feeAmount: 3000,
+  token0: {
+    symbol: "USDC",
+    name: "USD Coin",
+    decimals: 6,
+    address: "0xA0b86a33E6417c8Ade68E31cAdE412F9a8f03C5B"
+  },
+  token1: {
+    symbol: "WETH",
+    name: "Wrapped Ether",
+    decimals: 18,
+    address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+  },
+  volatileToken: 'token1', // WETH is volatile
+  stableToken: 'token0',   // USDC is stable
+  dbPath: "data/USDC-WETH_0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640.db",
+  rebalanceLogDbPath: "rebalance_log_usdc_weth_3000.db",
+  displayName: "USDC-ETH 0.3%",
+  startDate: getDate(2021, 5, 9),  // Warmup phase will replay events from May 5 to May 9
+  endDate: getDate(2024, 3, 13)    // Use realistic end date with actual data
+}
 
 // Global pool configuration instance
 let currentPoolConfig: PoolConfigManager | null = null;

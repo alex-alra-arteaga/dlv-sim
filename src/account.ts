@@ -53,76 +53,74 @@ export async function initializeAccountVault(
   const stableDecimals = poolConfig.getStableDecimals();
 
   // Get current pool price (stable per volatile token in WAD)
-  const currentPriceWad = account.vault.poolPrice(account.vault.pool.sqrtPriceX96);
-  
-  // Convert price to human-readable format and apply decimal adjustment
-  // poolPrice returns price in WAD but needs decimal scaling for ETH/USDT
-  const decimalAdjustment = Math.pow(10, volatileDecimals - stableDecimals);
-  const pricePerVolatileToken = (Number(currentPriceWad.toString()) / 1e18) * decimalAdjustment;
-  
+  const currentPriceWad = account.vault.priceStablePerVolatileWad(account.vault.pool.sqrtPriceX96);
+
+  const powVolatileDecimals = JSBI.exponentiate(JSBI.BigInt(10), JSBI.BigInt(volatileDecimals));
+  const powStableDecimals = JSBI.exponentiate(JSBI.BigInt(10), JSBI.BigInt(stableDecimals));
+
+  const oneVolatileRaw = powVolatileDecimals;
+  const stableForOneVolatileRaw = poolConfig.volatileToStable(oneVolatileRaw, currentPriceWad);
+
+  let pricePerVolatileToken = Number(stableForOneVolatileRaw.toString()) / Math.pow(10, stableDecimals);
   console.log(`Raw price WAD: ${currentPriceWad.toString()}`);
-  console.log(`Decimal adjustment factor: ${decimalAdjustment}`);
-  console.log(`Current ${volatileSymbol} price: $${pricePerVolatileToken.toFixed(2)}`);
-  
+
+  const targetStableAmount = JSBI.multiply(JSBI.BigInt(TARGET_USD_VALUE.toString()), powStableDecimals);
+
   let initialVolatileAmount: JSBI;
-  
+
   if (pricePerVolatileToken <= 0 || !Number.isFinite(pricePerVolatileToken)) {
     console.log(`Warning: Invalid price detected, attempting to derive price from pool data`);
-    
-    // Try to extract a reasonable price from the pool's sqrt price directly
-    let fallbackPrice: number = 0;
-    
-    // Use the raw sqrt price to calculate a basic price without decimal adjustment issues
+
     const sqrtPrice = account.vault.pool.sqrtPriceX96;
     const sqrtPriceNum = Number(sqrtPrice.toString());
-    
-    // Basic price calculation: (sqrtPrice / 2^96)^2
     const Q96 = Math.pow(2, 96);
     const rawPrice = Math.pow(sqrtPriceNum / Q96, 2);
-    
-    // Apply basic decimal scaling (token1/token0 price)
-    fallbackPrice = rawPrice * Math.pow(10, volatileDecimals - stableDecimals);
-    
+    const fallbackPrice = rawPrice * Math.pow(10, volatileDecimals - stableDecimals);
+    pricePerVolatileToken = fallbackPrice;
+
     const fallbackTokenAmount = TARGET_USD_VALUE / fallbackPrice;
-    
     initialVolatileAmount = JSBI.BigInt(
       Math.floor(fallbackTokenAmount * Math.pow(10, volatileDecimals))
     );
+
     console.log(`Using fallback: ${fallbackTokenAmount.toFixed(8)} ${volatileSymbol} (derived price $${fallbackPrice.toFixed(2)} = $${(fallbackTokenAmount * fallbackPrice).toFixed(2)})`);
   } else {
-    // Calculate how much volatile token we can buy with $500
-    const volatileTokensToDeposit = TARGET_USD_VALUE / pricePerVolatileToken;
-    
-    // Convert to native token units (multiply by 10^decimals)
-    initialVolatileAmount = JSBI.BigInt(
-      Math.floor(volatileTokensToDeposit * Math.pow(10, volatileDecimals))
-    );
-    
-    console.log(`Target USD value: $${TARGET_USD_VALUE}`);
-    console.log(`${volatileSymbol} tokens to deposit: ${volatileTokensToDeposit.toFixed(8)}`);
+    initialVolatileAmount = poolConfig.stableToVolatile(targetStableAmount, currentPriceWad);
   }
-  
+
+  console.log(`Target USD value: $${TARGET_USD_VALUE}`);
+  console.log(`${volatileSymbol} tokens to deposit: ${poolConfig.getFormattedVolatileAmount(initialVolatileAmount)}`);
+  console.log(`Current ${volatileSymbol} price: $${pricePerVolatileToken.toFixed(2)}`);
   console.log(`Initial ${volatileSymbol} amount (raw): ${initialVolatileAmount.toString()}`);
 
   const stableAmount = await account.vault.stableAmountForVolatileAmount(initialVolatileAmount);
-  console.log(`Initial ${stableSymbol} amount: ` + stableAmount.toString());
-  console.log(`Initial ${volatileSymbol} amount: ` + initialVolatileAmount.toString());
+  console.log(`Initial ${stableSymbol} amount: ${poolConfig.getFormattedStableAmount(stableAmount)}`);
+  console.log(`Initial ${volatileSymbol} amount: ${poolConfig.getFormattedVolatileAmount(initialVolatileAmount)}`);
 
   // 0.001% slippage
-  const amount0Min = JSBI.subtract(initialVolatileAmount, JSBI.divide(initialVolatileAmount, JSBI.BigInt(100000))); 
-  const amount1Min = JSBI.subtract(stableAmount, JSBI.divide(stableAmount, JSBI.BigInt(100000)));
+  const slippageDivisor = JSBI.BigInt(100000);
+  const volatileMin = JSBI.subtract(initialVolatileAmount, JSBI.divide(initialVolatileAmount, slippageDivisor));
+  const stableMin = JSBI.subtract(stableAmount, JSBI.divide(stableAmount, slippageDivisor));
 
-  await account.vault.deposit(
-    engine,
-    {
-      sender: MANAGER,
-      to: MANAGER,
-      amount0Desired: initialVolatileAmount,
-      amount1Desired: stableAmount,
-      amount0Min,
-      amount1Min
-    }
-  );
+  const depositParams = poolConfig.isVolatileToken0()
+    ? {
+        sender: MANAGER,
+        to: MANAGER,
+        amount0Desired: initialVolatileAmount,
+        amount1Desired: stableAmount,
+        amount0Min: volatileMin,
+        amount1Min: stableMin,
+      }
+    : {
+        sender: MANAGER,
+        to: MANAGER,
+        amount0Desired: stableAmount,
+        amount1Desired: initialVolatileAmount,
+        amount0Min: stableMin,
+        amount1Min: volatileMin,
+      };
+
+  await account.vault.deposit(engine, depositParams);
 
   const data = await account.vault.rebalanceBorrowedAmount();
   console.log("Rebalance borrowed amount: " + JSON.stringify(data));

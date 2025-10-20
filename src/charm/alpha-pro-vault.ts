@@ -282,6 +282,9 @@ export class AlphaProVault {
       const liqFromAmts = liquidityForAmounts(lo, hi, rem0, rem1, sqrtPriceX96);
       if (gt(liqToMint, liqFromAmts)) liqToMint = liqFromAmts;
 
+      console.log(`[DEPOSIT DEBUG] liqToMint=${liqToMint.toString()}, MAX_UINT128=${MAX_UINT128.toString()}`);
+      console.log(`[DEPOSIT DEBUG] liqToMint > MAX_UINT128? ${gt(liqToMint, MAX_UINT128)}`);
+
       const { amount0: mint0, amount1: mint1 } =
         await engine.mint(this.vaultAddress, lo, hi, toU128(liqToMint));
 
@@ -575,9 +578,20 @@ export class AlphaProVault {
 
     if (rebalanceBorrowedAmount.mode === "noop") return ZERO;
 
-    const priceSnap = this.poolPrice(this.pool.sqrtPriceX96);
+    const isVolatileToken0 = this.poolConfig.isVolatileToken0();
+    const toTokenOrder = (volatileAmount: JSBI, stableAmount: JSBI) => ({
+      amount0: isVolatileToken0 ? volatileAmount : stableAmount,
+      amount1: isVolatileToken0 ? stableAmount : volatileAmount,
+    });
+    const totalsToOrientation = (totals: { total0: JSBI; total1: JSBI }) => ({
+      volatile: isVolatileToken0 ? totals.total0 : totals.total1,
+      stable: isVolatileToken0 ? totals.total1 : totals.total0,
+    });
+
+    const priceSnap = this.priceStablePerVolatileWad(this.pool.sqrtPriceX96);
     const debt0 = this.virtualDebt;
     const A0 = await this.getTotalAmounts(false);
+    const totalsBefore = totalsToOrientation(A0);
 
     const safeSub = (lhs: JSBI, rhs: JSBI): JSBI =>
       JSBI.lessThan(lhs, rhs) ? ZERO : sub(lhs, rhs);
@@ -599,10 +613,15 @@ export class AlphaProVault {
 
       if (!(eq(rebalanceBorrowedAmount.volatileReceived, ZERO) && eq(stableDeposit, ZERO))) {
         try {
-          const preview = await this._previewDepositAmounts(
-            engine,
+          const { amount0: amount0Desired, amount1: amount1Desired } = toTokenOrder(
             rebalanceBorrowedAmount.volatileReceived,
             stableDeposit
+          );
+
+          const preview = await this._previewDepositAmounts(
+            engine,
+            amount0Desired,
+            amount1Desired
           );
 
           const amount0Min = minOutPpm(preview.amount0, 1000, JSBI.BigInt(50));       // 0.1% slippage
@@ -611,8 +630,8 @@ export class AlphaProVault {
           await this.deposit(engine, {
             sender: MANAGER,
             to: MANAGER,
-            amount0Desired: rebalanceBorrowedAmount.volatileReceived,
-            amount1Desired: stableDeposit,
+            amount0Desired,
+            amount1Desired,
             amount0Min,
             amount1Min
           });
@@ -631,13 +650,20 @@ export class AlphaProVault {
     } else if (rebalanceBorrowedAmount.mode === "deleverage") {
       // If no shares to burn, skip withdraw to avoid APV_ZeroShares.
 
-      const slip0 = div(rebalanceBorrowedAmount.withdrawVolatile, JSBI.BigInt(100000));
-      let amount0Min = safeSub(rebalanceBorrowedAmount.withdrawVolatile, slip0);
-      amount0Min = safeSub(amount0Min, JSBI.BigInt(5)); // ~$0.005
+      const withdrawTargets = toTokenOrder(
+        rebalanceBorrowedAmount.withdrawVolatile,
+        rebalanceBorrowedAmount.withdrawStable
+      );
 
-      const slip1 = div(rebalanceBorrowedAmount.withdrawStable, JSBI.BigInt(100000));
-      let amount1Min = safeSub(rebalanceBorrowedAmount.withdrawStable, slip1);
-      amount1Min = safeSub(amount1Min, JSBI.BigInt(5000)); // ~$0.005
+      const slip0 = div(withdrawTargets.amount0, JSBI.BigInt(100000));
+      let amount0Min = safeSub(withdrawTargets.amount0, slip0);
+      const dust0 = isVolatileToken0 ? JSBI.BigInt(5) : JSBI.BigInt(5000);
+      amount0Min = safeSub(amount0Min, dust0);
+
+      const slip1 = div(withdrawTargets.amount1, JSBI.BigInt(100000));
+      let amount1Min = safeSub(withdrawTargets.amount1, slip1);
+      const dust1 = isVolatileToken0 ? JSBI.BigInt(5000) : JSBI.BigInt(5);
+      amount1Min = safeSub(amount1Min, dust1);
 
       let actualDebtDecrease = rebalanceBorrowedAmount.repayStable;
 
@@ -652,8 +678,11 @@ export class AlphaProVault {
           });
 
           // Calculate deltas between planned and actual withdrawals
-          const volatileDelta = JSBI.subtract(actualAmount0, rebalanceBorrowedAmount.withdrawVolatile);
-          const stableDelta = JSBI.subtract(actualAmount1, rebalanceBorrowedAmount.withdrawStable);
+          const actualVolatile = isVolatileToken0 ? actualAmount0 : actualAmount1;
+          const actualStable = isVolatileToken0 ? actualAmount1 : actualAmount0;
+
+          const volatileDelta = JSBI.subtract(actualVolatile, rebalanceBorrowedAmount.withdrawVolatile);
+          const stableDelta = JSBI.subtract(actualStable, rebalanceBorrowedAmount.withdrawStable);
 
           // Convert any extra volatile to stable value and adjust debt decrease
           if (gt(volatileDelta, ZERO)) {
@@ -689,7 +718,8 @@ export class AlphaProVault {
       console.log("Rebalance debt: repaying " + repay.toString() + " stable tokens of " + this.virtualDebt.toString() + " virtual debt");
       this.virtualDebt = sub(this.virtualDebt, repay);
     }
-    const A1 = await this.getTotalAmounts(false);
+  const A1 = await this.getTotalAmounts(false);
+  const totalsAfter = totalsToOrientation(A1);
     const targetCrPercent = rebalanceBorrowedAmount.mode === "leverage" || rebalanceBorrowedAmount.mode === "deleverage"
       ? rebalanceBorrowedAmount.postCR
       : Number(TARGET_CR) / 1e16;
@@ -697,8 +727,12 @@ export class AlphaProVault {
     const targetCrWad = JSBI.BigInt(targetCrScaledStr);
 
     const pv = (totals: {total0:JSBI,total1:JSBI}, debt: JSBI) => {
-      const volatileValueInStable = this.volatileToStableValue(totals.total0, priceSnap);
-      return sub(add(totals.total1, volatileValueInStable), debt);
+      // Get volatile and stable amounts based on pool configuration
+      const volatileAmount = this.poolConfig.isVolatileToken0() ? totals.total0 : totals.total1;
+      const stableAmount = this.poolConfig.isVolatileToken0() ? totals.total1 : totals.total0;
+      
+      const volatileValueInStable = this.poolConfig.volatileToStable(volatileAmount, priceSnap);
+      return sub(add(stableAmount, volatileValueInStable), debt);
     };
     const pv0 = pv(A0, debt0);
     const pv1 = pv(A1, this.virtualDebt);
@@ -716,6 +750,11 @@ export class AlphaProVault {
       : sub(targetCrWad, crWad);
 
     const CR_TOL_WAD  = FullMath.mulDiv(targetCrWad, JSBI.BigInt(10), JSBI.BigInt(100));
+    
+    // Debug output for collateral ratio mismatch
+    console.log(`[DEBT REBALANCE DEBUG] Expected CR: ${targetCrPercent}%, Actual CR: ${(Number(crWad.toString()) / 1e18) * 100}%`);
+    console.log(`[DEBT REBALANCE DEBUG] Difference: ${(Number(diffWad.toString()) / 1e18) * 100}%, Tolerance: ${(Number(CR_TOL_WAD.toString()) / 1e18) * 100}%`);
+    
     ensure(
       JSBI.lessThanOrEqual(diffWad, CR_TOL_WAD),
       "Incorrect collateral ratio after debt rebalance",
@@ -734,8 +773,8 @@ export class AlphaProVault {
       const abs  = (x: JSBI) => (isNeg(x) ? neg(x) : x);
           
       // ---- actual deltas
-      const dStable = JSBI.subtract(A1.total1, A0.total1);
-      const dVolatile = JSBI.subtract(A1.total0, A0.total0);
+  const dStable = JSBI.subtract(totalsAfter.stable, totalsBefore.stable);
+  const dVolatile = JSBI.subtract(totalsAfter.volatile, totalsBefore.volatile);
 
       // ---- plan deltas (adjusted for what was actually deposited)
       const actualDebtIncrease = JSBI.subtract(this.virtualDebt, debt0);
@@ -821,9 +860,14 @@ export class AlphaProVault {
 
   async totalPoolValue(): Promise<JSBI> {
     const { total0, total1 } = await this.getTotalAmounts();
-    const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
-    const volatileValueInStable = this.volatileToStableValue(total0, priceWad);
-    return sub(add(total1, volatileValueInStable), this.virtualDebt);
+    const priceWad = this.priceStablePerVolatileWad(this.pool.sqrtPriceX96);
+    
+    // Get volatile and stable amounts based on pool configuration
+    const volatileAmount = this.poolConfig.isVolatileToken0() ? total0 : total1;
+    const stableAmount = this.poolConfig.isVolatileToken0() ? total1 : total0;
+    
+    const volatileValueInStable = this.poolConfig.volatileToStable(volatileAmount, priceWad);
+    return sub(add(stableAmount, volatileValueInStable), this.virtualDebt);
   }
 
   // price in WAD (stable per volatile token), no float loss; identical to (sqrtP^2 / Q96^2) * 1e18
@@ -834,10 +878,15 @@ export class AlphaProVault {
   }
 
   private _lpRatioFromRaw(total0: JSBI, total1: JSBI, sqrtPriceX96: JSBI): JSBI {
-    const priceWad = this.poolPrice(sqrtPriceX96);         // token1 per token0 in 1e18
-    const volatileValueInStable = this.volatileToStableValue(total0, priceWad);
+    const priceWad = this.priceStablePerVolatileWad(sqrtPriceX96); // stable per volatile in WAD
+    
+    // Get volatile and stable amounts based on pool configuration
+    const volatileAmount = this.poolConfig.isVolatileToken0() ? total0 : total1;
+    const stableAmount = this.poolConfig.isVolatileToken0() ? total1 : total0;
+    
+    const volatileValueInStable = this.poolConfig.volatileToStable(volatileAmount, priceWad);
     if (eq(volatileValueInStable, ZERO)) return JSBI.BigInt(Number.MAX_SAFE_INTEGER.toString());
-    return FullMath.mulDiv(total1, WAD, volatileValueInStable);      // (stable value / volatile value) in WAD
+    return FullMath.mulDiv(stableAmount, WAD, volatileValueInStable);      // (stable value / volatile value) in WAD
   }
 
   // Keep lpRatio() but default to pool-style round-down for parity checks
@@ -856,16 +905,19 @@ export class AlphaProVault {
 
     // Empty vault → base on current pool price (stable per volatile, in WAD)
     if (eq(total0, ZERO) && eq(total1, ZERO)) {
-      const priceWad = this.poolPrice(this.pool.sqrtPriceX96); // stable per volatile in 1e18
-      return FullMath.mulDivRoundingUp(volatileAmount, priceWad, WAD);
+      const priceWad = this.priceStablePerVolatileWad(this.pool.sqrtPriceX96); // stable per volatile in 1e18
+      return this.poolConfig.volatileToStable(volatileAmount, priceWad);
     }
 
-    // Existing vault → keep proportions: amount1 = ceil(volatileAmount * total1 / total0)
-    if (eq(total0, ZERO)) throw new Error("Vault expects only stable token (total0==0)");
-    if (eq(total1, ZERO)) return ZERO;
+    // Existing vault → keep proportions: stableAmount = ceil(volatileAmount * stableTotal / volatileTotal)
+    const volatileTotal = this.poolConfig.isVolatileToken0() ? total0 : total1;
+    const stableTotal = this.poolConfig.isVolatileToken0() ? total1 : total0;
+    
+    if (eq(volatileTotal, ZERO)) throw new Error("Vault expects only stable token (volatile total==0)");
+    if (eq(stableTotal, ZERO)) return ZERO;
 
-    const cross = mul(volatileAmount, total1);
-    return ceilDiv(cross, total0);
+    const cross = mul(volatileAmount, stableTotal);
+    return ceilDiv(cross, volatileTotal);
   }
   
   // Legacy method name for backwards compatibility
@@ -875,12 +927,20 @@ export class AlphaProVault {
 
   private async _collateralRatioWad(roundUp = false): Promise<JSBI> {
     const { total0, total1 } = await this.getTotalAmounts(roundUp);
-    const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
+    const priceWad = this.priceStablePerVolatileWad(this.pool.sqrtPriceX96);
     const debt = this.virtualDebt;
     if (eq(debt, ZERO)) return JSBI.BigInt(Number.MAX_SAFE_INTEGER.toString());
-    const volatileValueInStable = this.volatileToStableValue(total0, priceWad);
-    const totalInStable = add(total1, volatileValueInStable);
-    return FullMath.mulDiv(totalInStable, WAD, debt);
+    
+    // Get volatile and stable amounts based on pool configuration
+    const volatileAmount = this.poolConfig.isVolatileToken0() ? total0 : total1;
+    const stableAmount = this.poolConfig.isVolatileToken0() ? total1 : total0;
+    
+    const volatileValueInStable = this.poolConfig.volatileToStable(volatileAmount, priceWad);
+    
+    const totalInStable = add(stableAmount, volatileValueInStable);
+    
+    const result = FullMath.mulDiv(totalInStable, WAD, debt);
+    return result;
   }
 
   async collateralRatio(): Promise<number> {
@@ -895,17 +955,33 @@ priceAtTickWad(tick: number): JSBI {
   return this.poolPrice(sqrtAtTick);
 }
 
-// Humanized stable per volatile (WAD) - applies decimal scaling
+// Humanized stable per volatile (WAD) - with precision-safe inversion
 priceStablePerVolatileWad(sqrtPriceX96: JSBI): JSBI {
-  // poolPrice already returns the correct price in WAD format
-  return this.poolPrice(sqrtPriceX96);
+  const rawPriceWad = this.poolPrice(sqrtPriceX96); // token1/token0 ratio in raw units (scaled by 1e18)
+
+  // If volatile is token0, rawPrice already represents stable per volatile in raw units.
+  if (this.poolConfig.isVolatileToken0()) {
+    return rawPriceWad;
+  }
+
+  // If volatile is token1, rawPrice represents volatile per stable.
+  // Invert via mulDiv(WAD, WAD, rawPriceWad) to avoid precision loss while keeping raw-unit ratio semantics.
+  return FullMath.mulDiv(WAD, WAD, rawPriceWad);
 }
 
-// Humanized volatile per stable (WAD)
+// Humanized volatile per stable (WAD) - NO decimal scaling needed here
 priceVolatilePerStableWad(sqrtPriceX96: JSBI): JSBI {
-  const stablePerVolatileWad = this.priceStablePerVolatileWad(sqrtPriceX96);
-  // (1e18 / stablePerVolatileWad) with WAD safety
-  return FullMath.mulDiv(WAD, WAD, stablePerVolatileWad);
+  const rawPriceWad = this.poolPrice(sqrtPriceX96); // token1 per token0 in WAD
+  
+  // If volatile is token0, then rawPrice = token1/token0 = stable/volatile (need to invert)
+  // If volatile is token1, then rawPrice = token1/token0 = volatile/stable (what we want)
+  if (this.poolConfig.isVolatileToken0()) {
+    // Need to invert: volatile/stable = 1/(stable/volatile)
+    return FullMath.mulDiv(WAD, WAD, rawPriceWad);
+  } else {
+    // token1/token0 = volatile/stable (correct orientation)
+    return rawPriceWad;
+  }
 }
 
 // Legacy method names for backward compatibility
@@ -969,10 +1045,16 @@ async getPositionPriceRanges() {
       }
     | { mode: "noop" }
   > {
-    const { total0: volatile0, total1: stable0 } = await this.getTotalAmounts(false);
+    const { total0, total1 } = await this.getTotalAmounts(false);
     const D0 = this.virtualDebt; // stable token units
-    const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
-    const volatileValStable = this.volatileToStableValue(volatile0, priceWad);
+    const priceWad = this.priceStablePerVolatileWad(this.pool.sqrtPriceX96);
+    const isVolatileToken0 = this.poolConfig.isVolatileToken0();
+    
+    // Get volatile and stable amounts based on pool configuration
+    const volatile0 = isVolatileToken0 ? total0 : total1;
+    const stable0 = isVolatileToken0 ? total1 : total0;
+    
+    const volatileValStable = this.poolConfig.volatileToStable(volatile0, priceWad);
     const V0 = add(stable0, volatileValStable);
   
     const feeFloat = dlvConfig?.debtToVolatileSwapFee ?? 0.003;
@@ -1042,13 +1124,18 @@ async getPositionPriceRanges() {
       const { total0: t0RU, total1: t1RU } = await this.getTotalAmounts(true);
       const { total0: t0RD, total1: t1RD } = await this.getTotalAmounts(false);
 
+      const volatileRU = isVolatileToken0 ? t0RU : t1RU;
+      const stableRU = isVolatileToken0 ? t1RU : t0RU;
+      const volatileRD = isVolatileToken0 ? t0RD : t1RD;
+      const stableRD = isVolatileToken0 ? t1RD : t0RD;
+
       // Fallback if something is zero
-      if (eq(t0RU, ZERO) || eq(t1RU, ZERO) || eq(t0RD, ZERO) || eq(t1RD, ZERO)) {
+      if (eq(volatileRU, ZERO) || eq(stableRU, ZERO) || eq(volatileRD, ZERO) || eq(stableRD, ZERO)) {
         // keep original plan; nothing better to do safely
       } else {
         // ratio (stable per volatile) in WAD
-        const rRU = FullMath.mulDiv(t1RU, WAD, t0RU);
-        const rRD = FullMath.mulDiv(t1RD, WAD, t0RD);
+        const rRU = FullMath.mulDiv(stableRU, WAD, volatileRU);
+        const rRD = FullMath.mulDiv(stableRD, WAD, volatileRD);
       
         // widen with safety (use config, but bump a bit to survive poke deltas)
         const belowPPM = JSBI.BigInt(Math.floor(((dlvConfig?.deviationThresholdBelow ?? 0.10) + 0.05) * 1_000_000)); // +5% buffer
@@ -1095,6 +1182,11 @@ async getPositionPriceRanges() {
       const netStable = clampSub(B, swapFeeUSDC_final);
       const V1 = add(V0, netStable);
       const D1 = add(D0, B);
+      
+      if (eq(D1, ZERO)) {
+        return { mode: "noop" };
+      }
+      
       const postcrWad = FullMath.mulDiv(V1, WAD, D1);
       const postCR = (Number(postcrWad.toString()) / 1e18) * 100;
 
@@ -1296,9 +1388,14 @@ async getPositionPriceRanges() {
 
   /** Get accumulated swap fees in stable token value using current price */
   async getAccumulatedSwapFeesStableValue(): Promise<JSBI> {
-    const priceWad = this.poolPrice(this.pool.sqrtPriceX96); // stable per volatile in WAD
-    const volatileFeesValueInStable = this.volatileToStableValue(this.accumulatedSwapFees0, priceWad);
-    return add(this.accumulatedSwapFees1, volatileFeesValueInStable);
+    const priceWad = this.priceStablePerVolatileWad(this.pool.sqrtPriceX96); // stable per volatile in WAD
+    
+    // Get volatile and stable fees based on pool configuration
+    const volatileFees = this.poolConfig.isVolatileToken0() ? this.accumulatedSwapFees0 : this.accumulatedSwapFees1;
+    const stableFees = this.poolConfig.isVolatileToken0() ? this.accumulatedSwapFees1 : this.accumulatedSwapFees0;
+    
+    const volatileFeesValueInStable = this.poolConfig.volatileToStable(volatileFees, priceWad);
+    return add(stableFees, volatileFeesValueInStable);
   }
 
   /** Legacy method name for backward compatibility */

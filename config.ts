@@ -1,10 +1,10 @@
 import { VaultParams } from "./src/charm/types";
 import { LookUpPeriod } from "./src/enums";
-import { setCurrentPoolConfig, ETH_USDT_CONFIG } from "./src/pool-config";
+import { setCurrentPoolConfig, USDC_ETH_CONFIG } from "./src/pool-config";
 
 // Initialize the pool configuration (this will be used throughout the application)
 // To use a different pool, change this line to import and set a different configuration
-setCurrentPoolConfig(ETH_USDT_CONFIG);
+setCurrentPoolConfig(USDC_ETH_CONFIG);
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
 
