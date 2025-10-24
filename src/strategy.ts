@@ -92,16 +92,50 @@ export async function buildStrategy(
   async function backtest(startDate: Date, endDate: Date, lookupPeriod: LookUpPeriod): Promise<void> {
     const fmtUTC = (d: Date) => formatInTimeZone(d, 'UTC', 'yyyy-MM-dd HH:mm:ss');
 
+    const fetchWithRetry = async <T>(label: string, task: () => Promise<T>): Promise<T> => {
+      const maxAttempts = 5;
+      const baseDelayMs = 250;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          return await task();
+        } catch (error: any) {
+          const message = error?.message ?? "";
+          const isTimeout = error?.name === "KnexTimeoutError" || message.includes("Knex: Timeout acquiring a connection");
+          const isBusy = message.includes("SQLITE_BUSY") || message.includes("database is locked");
+
+          if ((!isTimeout && !isBusy) || attempt === maxAttempts) {
+            throw error;
+          }
+
+          const delay = Math.min(baseDelayMs * 2 ** (attempt - 1), 5000);
+          console.warn(`[DB RETRY] ${label} attempt ${attempt} failed (${message.trim()}). Retrying in ${delay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+
+      // This should be unreachable, but satisfies TypeScript's return expectations.
+      throw new Error(`[DB RETRY] ${label} failed after ${maxAttempts} attempts`);
+    };
+
     // initial environment
     async function* streamEventsByDate(
       start: Date,
       end: Date
     ): AsyncGenerator<PoolEvent, void, unknown> {
-      const [mints, burns, swaps] = await Promise.all([
-        eventDB.getLiquidityEventsByDate(EventType.MINT, fmtUTC(start), fmtUTC(end)),
-        eventDB.getLiquidityEventsByDate(EventType.BURN, fmtUTC(start), fmtUTC(end)),
-        eventDB.getSwapEventsByDate(                     fmtUTC(start), fmtUTC(end)),
-      ]);
+      // Fetch sequentially to keep SQLite connection usage low; the underlying pool is narrow.
+      const startKey = fmtUTC(start);
+      const endKey = fmtUTC(end);
+
+      const mints = await fetchWithRetry("mints", () =>
+        eventDB.getLiquidityEventsByDate(EventType.MINT, startKey, endKey)
+      );
+      const burns = await fetchWithRetry("burns", () =>
+        eventDB.getLiquidityEventsByDate(EventType.BURN, startKey, endKey)
+      );
+      const swaps = await fetchWithRetry("swaps", () =>
+        eventDB.getSwapEventsByDate(startKey, endKey)
+      );
     
       let i = 0, j = 0, k = 0;
       while (true) {

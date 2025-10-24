@@ -82,7 +82,6 @@ export class PoolConfigManager {
   getDisplayName(): string {
     return this.config.displayName;
   }
-  
   // Token getters
   getVolatileToken(): TokenConfig {
     return this.config.volatileToken === 'token0' ? this.config.token0 : this.config.token1;
@@ -175,6 +174,19 @@ export class PoolConfigManager {
     const WAD = JSBI.BigInt("1000000000000000000"); // 1e18
     return FullMath.mulDiv(stableAmount, WAD, priceWad);
   }
+
+  /**
+   * Convert a stable-per-volatile WAD price into a human-readable stable price
+   * (e.g. USDC per ETH) using the configured token decimals.
+   */
+  stablePerVolatilePrice(priceWad: JSBI): number {
+    const oneVolatileRaw = JSBI.exponentiate(
+      JSBI.BigInt(10),
+      JSBI.BigInt(this.getVolatileDecimals())
+    );
+    const stableRaw = this.volatileToStable(oneVolatileRaw, priceWad);
+    return Number(stableRaw.toString()) / Math.pow(10, this.getStableDecimals());
+  }
   
   /**
    * Convert token0 amount to token1 amount using price
@@ -244,8 +256,8 @@ export const WBTC_USDC_CONFIG: PoolConfig = {
   dbPath: "data/WBTC-USDC_0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35.db",
   rebalanceLogDbPath: "rebalance_log_usdc_wbtc_3000.db",
   displayName: "WBTC-USDC 0.3%",
-  startDate: getDate(2021, 5, 6),  // Pool started May 5, 2021, but use May 9 for clean start
-  endDate: getDate(2024, 12, 15)     // Use Sept 5, 2024 for consistency
+  startDate: getDate(2021, 5, 6),
+  endDate: getDate(2024, 12, 13)
 };
 
 export const ETH_USDT_CONFIG: PoolConfig = {
@@ -293,7 +305,31 @@ export const USDC_ETH_CONFIG: PoolConfig = {
   rebalanceLogDbPath: "rebalance_log_usdc_weth_3000.db",
   displayName: "USDC-ETH 0.3%",
   startDate: getDate(2021, 5, 9),  // Warmup phase will replay events from May 5 to May 9
-  endDate: getDate(2024, 3, 13)    // Use realistic end date with actual data
+  endDate: getDate(2025, 5, 31)    // Use realistic end date with actual data
+}
+
+export const PAXG_USDC_CONFIG: PoolConfig = {
+  poolAddress: "0x5ae13baaef0620fdae1d355495dc51a17adb4082",
+  feeAmount: 500,
+  token0: {
+    symbol: "PAXG",
+    name: "Pax Gold",
+    decimals: 18,
+    address: "0x45804880De22913dAFE09f4980848ECE6EcbAf78"
+  },
+  token1: {
+    symbol: "USDC",
+    name: "USD Coin",
+    decimals: 6,
+    address: "0xA0b86a33E6417c8Ade68E31cAdE412F9a8f03C5B"
+  },
+  volatileToken: 'token0', // PAXG is volatile
+  stableToken: 'token1',   // USDC is stable
+  dbPath: "data/PAXG-USDC_0x5ae13baaef0620fdae1d355495dc51a17adb4082.db",
+  rebalanceLogDbPath: "rebalance_log_usdc_paxg_500.db",
+  displayName: "PAXG-USDC 0.05%",
+  startDate: getDate(2022, 5, 6),
+  endDate: getDate(2025, 10, 17)
 }
 
 // Global pool configuration instance

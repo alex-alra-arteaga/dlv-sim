@@ -1,5 +1,5 @@
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
-index 2e87b12..cf8cbde 100644
+index 2e87b12..056126c 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
 @@ -37,11 +37,19 @@ class MainnetDataDownloader {
@@ -27,18 +27,61 @@ index 2e87b12..cf8cbde 100644
      }
      async parseEndBlockTypeWhenInit(toBlock, poolAddress) {
          switch (toBlock) {
+@@ -87,7 +95,14 @@ class MainnetDataDownloader {
+         if (toBlockAsNumber < deploymentBlockNumber)
+             throw new Error(`The pool does not exist at block height: ${toBlockAsNumber}, it was deployed at block height: ${deploymentBlockNumber}`);
+         let initializeTopic = uniswapV3Pool.filters.Initialize();
+-        let initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic);
++        const initializationWindow = Math.min(batchSize, 9999);
++        let initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic, deploymentBlockNumber, Math.min(deploymentBlockNumber + initializationWindow, toBlockAsNumber));
++        if (!initializationEvent.length) {
++            initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic, deploymentBlockNumber, deploymentBlockNumber);
++        }
++        if (!initializationEvent.length) {
++            throw new Error("Initialize event not found within allowed range.");
++        }
+         let initializationSqrtPriceX96 = initializationEvent[0].args.sqrtPriceX96;
+         let initializationEventBlockNumber = initializationEvent[0].blockNumber;
+         // check db file then
+@@ -145,7 +160,14 @@ class MainnetDataDownloader {
+             if (0 == initializationEventBlockNumber) {
+                 updateInitializationEvent = true;
+                 let initializeTopic = uniswapV3Pool.filters.Initialize();
+-                let initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic);
++                const initializationWindow = Math.min(batchSize, 9999);
++                let initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic, deploymentBlockNumber, Math.min(deploymentBlockNumber + initializationWindow, toBlockAsNumber));
++                if (!initializationEvent.length) {
++                    initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic, deploymentBlockNumber, deploymentBlockNumber);
++                }
++                if (!initializationEvent.length) {
++                    throw new Error("Initialize event not found within allowed range.");
++                }
+                 await eventDB.addInitialSqrtPriceX96(initializationEvent[0].args.sqrtPriceX96.toString());
+                 initializationEventBlockNumber = initializationEvent[0].blockNumber;
+                 await eventDB.saveInitializationEventBlockNumber(initializationEventBlockNumber);
+@@ -212,6 +234,7 @@ class MainnetDataDownloader {
+     async downloadEventsFromSubgraph(poolAddress, token0Decimals, token1Decimals, eventDB, fromBlock, toBlock, batchSize) {
+         while (fromBlock <= toBlock) {
+             let endBlock = fromBlock + batchSize > toBlock ? toBlock : fromBlock + batchSize;
++            console.log(`Downloading SUBGRAPH events from block ${fromBlock} to ${endBlock}`);
+             let latestEventBlockNumber = Math.max(await this.saveEventsFromSubgraph(poolAddress, token0Decimals, token1Decimals, eventDB, EventType_1.EventType.MINT, fromBlock, endBlock), await this.saveEventsFromSubgraph(poolAddress, token0Decimals, token1Decimals, eventDB, EventType_1.EventType.BURN, fromBlock, endBlock), await this.saveEventsFromSubgraph(poolAddress, token0Decimals, token1Decimals, eventDB, EventType_1.EventType.SWAP, fromBlock, endBlock));
+             await eventDB.saveLatestEventBlockNumber(latestEventBlockNumber);
+             fromBlock += batchSize + 1;
+@@ -221,6 +244,7 @@ class MainnetDataDownloader {
+     async downloadEventsFromRPC(uniswapV3Pool, eventDB, fromBlock, toBlock, batchSize) {
+         while (fromBlock <= toBlock) {
+             let endBlock = fromBlock + batchSize > toBlock ? toBlock : fromBlock + batchSize;
++            console.log(`Downloading RPC events from block ${fromBlock} to ${endBlock}`);
+             let latestEventBlockNumber = Math.max(await this.saveEventsFromRPC(uniswapV3Pool, eventDB, EventType_1.EventType.MINT, fromBlock, endBlock), await this.saveEventsFromRPC(uniswapV3Pool, eventDB, EventType_1.EventType.BURN, fromBlock, endBlock), await this.saveEventsFromRPC(uniswapV3Pool, eventDB, EventType_1.EventType.SWAP, fromBlock, endBlock));
+             await eventDB.saveLatestEventBlockNumber(latestEventBlockNumber);
+             fromBlock += batchSize + 1;
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
-index e72b9f2..a5175aa 100644
+index e72b9f2..8d4c479 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/CorePool.js
-@@ -110,11 +110,25 @@ class CorePool {
-                 ? jsbi_1.default.add(TickMath_1.TickMath.MIN_SQRT_RATIO, InternalConstants_1.ONE)
+@@ -111,10 +111,16 @@ class CorePool {
                  : jsbi_1.default.subtract(TickMath_1.TickMath.MAX_SQRT_RATIO, InternalConstants_1.ONE);
          if (zeroForOne) {
-+            console.log('[DEBUG swap] zeroForOne',
-+                'limit', sqrtPriceLimitX96.toString(),
-+                'current', this.sqrtPriceX96.toString(),
-+                'amountSpecified', amountSpecified.toString());
              assert_1.default(jsbi_1.default.greaterThan(sqrtPriceLimitX96, TickMath_1.TickMath.MIN_SQRT_RATIO), "RATIO_MIN");
 +            if (!jsbi_1.default.lessThan(sqrtPriceLimitX96, this.sqrtPriceX96)) {
 +                sqrtPriceLimitX96 = jsbi_1.default.subtract(this.sqrtPriceX96, InternalConstants_1.ONE);
@@ -46,10 +89,6 @@ index e72b9f2..a5175aa 100644
              assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, this.sqrtPriceX96), "RATIO_CURRENT");
          }
          else {
-+            console.log('[DEBUG swap] oneForZero',
-+                'limit', sqrtPriceLimitX96.toString(),
-+                'current', this.sqrtPriceX96.toString(),
-+                'amountSpecified', amountSpecified.toString());
              assert_1.default(jsbi_1.default.lessThan(sqrtPriceLimitX96, TickMath_1.TickMath.MAX_SQRT_RATIO), "RATIO_MAX");
 +            if (!jsbi_1.default.greaterThan(sqrtPriceLimitX96, this.sqrtPriceX96)) {
 +                sqrtPriceLimitX96 = jsbi_1.default.add(this.sqrtPriceX96, InternalConstants_1.ONE);
@@ -102,7 +141,7 @@ index f6e4bfb..417fe8d 100644
      insertPoolConfig(poolConfig, trx) {
          return this.getBuilderContext("pool_config", trx).insert([
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
-index 02b6bb1..1dba0ca 100644
+index 02b6bb1..067101d 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
 @@ -2,3 +2,6 @@ export declare function getDate(year: number, month: number, day: number, hour?:
@@ -112,7 +151,6 @@ index 02b6bb1..1dba0ca 100644
 +export declare function getNextHour(date: Date): Date;
 +export declare function getNextMinute(date: Date): Date;
 +export declare function getNext4Hour(date: Date): Date;
-\ No newline at end of file
 diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
 index a7c3999..e48a1ac 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js

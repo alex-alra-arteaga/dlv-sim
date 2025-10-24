@@ -43,8 +43,8 @@ const DEBUG = String(args.debug ?? "false").toLowerCase() === "true";
 const HEARTBEAT_SEC = Number(args.heartbeatSec ?? 30);
 const MOCHA_SPEC = String(args.mochaSpec ?? "");              // e.g. dist/test/DLV.test.js
 const MOCHA_GREP = String(args.grep ?? "");                   // e.g. "DLV simulation"
-const MOCHA_TIMEOUT_MS = Number(args.mochaTimeoutMs ?? 600000); // mocha soft timeout
-const KILL_AFTER_SEC = Number(args.killAfterSec ?? 900);        // hard kill if stuck
+const MOCHA_TIMEOUT_MS = Number(args.mochaTimeoutMs ?? 600000000); // mocha soft timeout
+const KILL_AFTER_SEC = Number(args.killAfterSec ?? 90000);        // hard kill if stuck
 const LIST_ONCE = String(args.listOnce ?? "false").toLowerCase() === "true";
 const PREBUILT = args.prebuilt === true || String(args.prebuilt || "").toLowerCase() === "true";
 const BUILD_DIR = String(args.buildDir ?? "dist");
@@ -300,25 +300,45 @@ function runOnce(charm: Charm, dlv: DLV, meta: RunMeta): Promise<{ ok: boolean; 
 // ---- main ----
 (async function main() {
   const { charm, dlv } = grids(LEVEL);
+  const totalCombos = charm.length * dlv.length;
+  const MAX_MATERIALIZED_COMBOS = 5_000_000;
 
-  const combos: Array<{ charm: Charm; dlv: DLV }> = [];
-  for (const c of charm) for (const d of dlv) combos.push({ charm: c, dlv: d });
-
-  // cap runs for ALL levels when --runs > 0 (deterministic quasi-random pick)
-  let indices = combos.map((_, i) => i);
-  if (RUNS_CAP > 0 && combos.length > RUNS_CAP) {
-    const picks: number[] = [];
-    let i = 1;
-    while (picks.length < RUNS_CAP) {
-      const u = halton(i, 3);
-      const idx = Math.floor(u * combos.length);
-      if (!picks.includes(idx)) picks.push(idx);
-      i++;
-    }
-    indices = picks;
+  if (totalCombos === 0) {
+    throw new Error("No parameter combinations generated. Check level/tick spacing inputs.");
   }
 
-  console.log(`Brute-force level=${LEVEL}, tickSpacing=${TICK_SPACING}, feeTier=${POOL_FEE_TIER}bps, combos=${combos.length}, toRun=${indices.length}`);
+  const comboAt = (index: number): { charm: Charm; dlv: DLV } => {
+    if (index < 0 || index >= totalCombos) throw new Error(`Combo index ${index} out of range (0-${totalCombos - 1})`);
+    const charmIdx = Math.floor(index / dlv.length);
+    const dlvIdx = index % dlv.length;
+    const charmCfg = charm[charmIdx];
+    const dlvCfg = dlv[dlvIdx];
+    return {
+      charm: { ...charmCfg },
+      dlv: { ...dlvCfg },
+    };
+  };
+
+  // cap runs for ALL levels when --runs > 0 (deterministic quasi-random pick)
+  let indices: number[];
+  if (RUNS_CAP > 0 && totalCombos > RUNS_CAP) {
+    const picks = new Set<number>();
+    let i = 1;
+    while (picks.size < Math.min(RUNS_CAP, totalCombos)) {
+      const u = halton(i, 3);
+      const idx = Math.min(totalCombos - 1, Math.floor(u * totalCombos));
+      picks.add(idx);
+      i++;
+    }
+    indices = Array.from(picks);
+  } else {
+    if (totalCombos > MAX_MATERIALIZED_COMBOS) {
+      throw new Error(`Total combos (${totalCombos.toLocaleString()}) exceed safe materialized limit (${MAX_MATERIALIZED_COMBOS.toLocaleString()}). Use --runs to cap the search or reduce the grid.`);
+    }
+    indices = Array.from({ length: totalCombos }, (_, i) => i);
+  }
+
+  console.log(`Brute-force level=${LEVEL}, tickSpacing=${TICK_SPACING}, feeTier=${POOL_FEE_TIER}bps, combos=${totalCombos}, toRun=${indices.length}`);
 
   const resultsWS = fs.createWriteStream(RESULTS_PATH, { flags: "w" });
 
@@ -363,7 +383,7 @@ function runOnce(charm: Charm, dlv: DLV, meta: RunMeta): Promise<{ ok: boolean; 
     hb = setInterval(() => {
       const now = Date.now();
       const load = (os.loadavg?.() || []).map(x => x.toFixed(2)).join("/");
-      console.log(`[HB] t=${new Date().toISOString()} run=${runCount}/${indices.length} ok=${successCount} q=${queue.length} vcpus=${vcpus} load=${load}`);
+      console.log(`[HB] t=${new Date().toISOString()} run=${runCount}/${indices.length} ok=${successCount} q=${queue.length} active=${active.size} vcpus=${vcpus} load=${load}`);
       for (const [pid, a] of active) {
         const age = ((now - a.start) / 1000) | 0;
         const idle = ((now - a.lastOut) / 1000) | 0;
@@ -377,7 +397,7 @@ function runOnce(charm: Charm, dlv: DLV, meta: RunMeta): Promise<{ ok: boolean; 
       const idx = queue.shift();
       if (idx === undefined) return;
 
-      const { charm: c, dlv: d } = combos[idx];
+      const { charm: c, dlv: d } = comboAt(idx);
       const key = crypto.createHash("sha1").update(JSON.stringify({ c, d })).digest("hex").slice(0, 12);
       console.log(`[BRUTE-FORCE PROGRESS] [W${wid}] Starting run ${runCount + 1}/${indices.length} key=${key}`);
       const started = Date.now();

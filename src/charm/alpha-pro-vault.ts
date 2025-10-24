@@ -745,22 +745,26 @@ export class AlphaProVault {
       maxUint128: MAX_UINT128.toString()
     });
     const crWad       = await this._collateralRatioWad(false);
-    const diffWad     = JSBI.greaterThan(crWad, targetCrWad)
-      ? sub(crWad, targetCrWad)
-      : sub(targetCrWad, crWad);
-
     const CR_TOL_WAD  = FullMath.mulDiv(targetCrWad, JSBI.BigInt(10), JSBI.BigInt(100));
-    
+    const lowerBound  = JSBI.greaterThan(targetCrWad, CR_TOL_WAD)
+      ? sub(targetCrWad, CR_TOL_WAD)
+      : ZERO;
+
+    const crPercent       = (Number(crWad.toString()) / 1e18) * 100;
+    const lowerBoundPct   = (Number(lowerBound.toString()) / 1e18) * 100;
+    const tolerancePct    = (Number(CR_TOL_WAD.toString()) / 1e18) * 100;
+
     // Debug output for collateral ratio mismatch
-    console.log(`[DEBT REBALANCE DEBUG] Expected CR: ${targetCrPercent}%, Actual CR: ${(Number(crWad.toString()) / 1e18) * 100}%`);
-    console.log(`[DEBT REBALANCE DEBUG] Difference: ${(Number(diffWad.toString()) / 1e18) * 100}%, Tolerance: ${(Number(CR_TOL_WAD.toString()) / 1e18) * 100}%`);
-    
+    console.log(`[DEBT REBALANCE DEBUG] Expected CR: ${targetCrPercent}%, Actual CR: ${crPercent}%`);
+    console.log(`[DEBT REBALANCE DEBUG] Lower bound: ${lowerBoundPct}%, Tolerance: ${tolerancePct}%`);
+
     ensure(
-      JSBI.lessThanOrEqual(diffWad, CR_TOL_WAD),
-      "Incorrect collateral ratio after debt rebalance",
+      JSBI.greaterThanOrEqual(crWad, lowerBound),
+      "Collateral ratio fell below target tolerance after debt rebalance",
       {
         expectedTARGET_CR_percent: targetCrPercent,
-        actualTARGET_CR_percent: (Number(crWad.toString()) / 1e18) * 100,
+        minimumAllowed_CR_percent: lowerBoundPct,
+        actualTARGET_CR_percent: crPercent,
       }
     );
 

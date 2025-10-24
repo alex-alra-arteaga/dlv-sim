@@ -127,7 +127,11 @@ describe("DLV Strategy", function () {
       switch (phase) {
         case Phase.AFTER_NEW_TIME_PERIOD: {
           const count = (variable.get(TICK_COUNT) as number) ?? 0;
-          console.log('Volatile price: ', vault.poolPrice(_corePoolView.sqrtPriceX96).toString());
+          const priceWad = vault.priceStablePerVolatileWad(_corePoolView.sqrtPriceX96);
+          const humanPrice = poolConfig.stablePerVolatilePrice(priceWad);
+          console.log(
+            `Spot ${poolConfig.getVolatileSymbol()} price: $${humanPrice.toFixed(2)} (raw ${priceWad.toString()})`
+          );
 
           if (rebalance === Rebalance.ALM) {
             return count % charmRebalancePeriod === 0;
@@ -181,7 +185,7 @@ const act = async function (
 ): Promise<void> {
   switch (phase) {
     case Phase.AFTER_NEW_TIME_PERIOD: {
-      const currPrice = vault.poolPrice(vault.pool.sqrtPriceX96);
+      const currPrice = vault.priceStablePerVolatileWad(vault.pool.sqrtPriceX96);
       const startAmounts = await vault.getTotalAmounts(); // gross token balances now
       const volatileValueInStable = vault.volatileToStableValue(startAmounts.total0, currPrice);
       const gavStart = JSBI.add(startAmounts.total1, volatileValueInStable); // for logging only
@@ -190,7 +194,11 @@ const act = async function (
       const prevTotalPoolValue = await vault.totalPoolValue(); // NAV_t_start
       const debtNow = vault.virtualDebt; // constant between rebalances
 
-      console.log("[START] price:", currPrice.toString());
+      const startPriceHuman = poolConfig.stablePerVolatilePrice(currPrice);
+      console.log("[START] price (raw):", currPrice.toString());
+      console.log(
+        `[START] price (USD): $${startPriceHuman.toFixed(2)}`
+      );
       console.log("[START] amounts.total0 (volatile raw):", startAmounts.total0.toString());
       console.log("[START] amounts.total1 (stable raw):", startAmounts.total1.toString());
       console.log("[START] GAV:", gavStart.toString());

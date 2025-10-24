@@ -29,6 +29,15 @@ export class LogDBManager {
       connection: {
         filename: dbPath, //:memory:
       },
+      pool: {
+        min: 1,
+        max: 1,
+        afterCreate: (conn: any, done: (err: Error | null, conn: any) => void) => {
+          conn.run("PRAGMA journal_mode = WAL;");
+          conn.run("PRAGMA synchronous = NORMAL;");
+          conn.run("PRAGMA busy_timeout = 5000;", (err: Error | null) => done(err, conn));
+        },
+      },
       // sqlite does not support inserting default values. Set the `useNullAsDefault` flag to hide the warning.
       useNullAsDefault: true,
     };
