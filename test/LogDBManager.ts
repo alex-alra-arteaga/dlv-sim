@@ -60,6 +60,7 @@ export class LogDBManager {
             t.string("afterCollateralRatio", 255);
             t.string("accumulatedSwapFees0", 255);
             t.string("accumulatedSwapFees1", 255);
+            t.string("almSwapFeeStable", 255);
             t.string("volatileHoldValueStable", 255);
             t.string("realizedIL", 255);
             t.string("swapFeesGainedThisPeriod", 255);
@@ -87,6 +88,7 @@ export class LogDBManager {
         { name: "afterCollateralRatio", type: "string" },
         { name: "accumulatedSwapFees0", type: "string" },
         { name: "accumulatedSwapFees1", type: "string" },
+        { name: "almSwapFeeStable", type: "string" },
         { name: "volatileHoldValueStable", type: "string" },
         { name: "realizedIL", type: "string" },
         { name: "swapFeesGainedThisPeriod", type: "string" },
@@ -125,6 +127,7 @@ export class LogDBManager {
           rebalanceLog.afterTotalPoolValue,
           rebalanceLog.lpRatio,
           rebalanceLog.swapFeeStable,
+          rebalanceLog.almSwapFeeStable ?? BN.from(0),
           rebalanceLog.prevCollateralRatio,
           rebalanceLog.afterCollateralRatio,
           rebalanceLog.accumulatedSwapFees0,
@@ -161,6 +164,7 @@ export class LogDBManager {
     afterTotalPoolValue: BN,
     lpRatio: BN,
     swapFeeStable: BN,
+    almSwapFeeStable: BN,
     prevCollateralRatio: BN,
     afterCollateralRatio: BN,
     accumulatedSwapFees0: BN,
@@ -186,6 +190,7 @@ export class LogDBManager {
         afterTotalPoolValue: afterTotalPoolValue.toString(),
         lpRatio: lpRatio.toString(),
         swapFeeStable: swapFeeStable.toString(),
+        almSwapFeeStable: almSwapFeeStable.toString(),
         prevCollateralRatio: prevCollateralRatio.toString(),
         afterCollateralRatio: afterCollateralRatio.toString(),
         accumulatedSwapFees0: accumulatedSwapFees0.toString(),

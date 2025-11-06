@@ -28,6 +28,8 @@ const CONFIG = {
   asset1Symbol: poolConfig.getToken1Symbol(),
   asset0Decimals: poolConfig.getToken0Decimals(),
   asset1Decimals: poolConfig.getToken1Decimals(),
+  volatileDecimals: poolConfig.getVolatileDecimals(),
+  stableDecimals: poolConfig.getStableDecimals(),
   
   // volatile and stable token info
   volatileSymbol: poolConfig.getVolatileSymbol(),
@@ -64,6 +66,7 @@ type RawRow = {
   afterTotalPoolValue: string;   // 8
   lpRatio: string;               // 1e18 == perfectly balanced (higher => more stable)
   swapFeeStable: string;         // assumed native stable token units
+  almSwapFeeStable?: string;
   prevCollateralRatio: string;   // 8
   afterCollateralRatio: string;  // 8
   accumulatedSwapFees0: string;  // accumulated token0 swap fees collected
@@ -96,6 +99,7 @@ type ParsedRow = {
   volatileHoldValueStable: number; // value if we held volatile token from start (in stable token)
   realizedIL: number;          // realized impermanent loss in stable token
   swapFeesGainedThisPeriod: number; // swap fees gained during this period
+  almFeeAccumulated?: number; // plugin property for ALM fee aggregation
 } & {
   // Dynamic properties that depend on pool configuration
   [key: string]: number; // allows volatile, stable, feeStable, btcHoldValueInStable, etc.
@@ -183,7 +187,9 @@ function parseRow(r: RawRow): ParsedRow {
   // Add dynamic token properties
   result[CONFIG.asset0Symbol.toLowerCase()] = toNum(r.total0) / 10 ** CONFIG.asset0Decimals;
   result[CONFIG.asset1Symbol.toLowerCase()] = toNum(r.total1) / 10 ** CONFIG.asset1Decimals;
-  result[`fee${CONFIG.stableSymbol}`] = toNum(r.swapFeeStable) / 1e6;
+  const stableDivisor = 10 ** CONFIG.stableDecimals;
+  result[`fee${CONFIG.stableSymbol}`] = toNum(r.swapFeeStable || "0") / stableDivisor;
+  result[`almFee${CONFIG.stableSymbol}`] = toNum(r.almSwapFeeStable || "0") / stableDivisor;
   result[`${CONFIG.volatileSymbol.toLowerCase()}HoldValue${CONFIG.stableSymbol}`] = toNum(r.volatileHoldValueStable || "0") / 1e6;
 
   return result;
@@ -228,6 +234,8 @@ function aggregate(rows: Series, g: Grain): Series {
     map.set(k, arr);
   }
   const out: Series = [];
+  const feeKey = `fee${CONFIG.stableSymbol}`;
+  const almFeeKey = `almFee${CONFIG.stableSymbol}`;
   for (const [k, arr] of map) {
     const n = arr.length;
     const sum = (p: (x: ParsedRow) => number) => arr.reduce((a, b) => a + p(b), 0);
@@ -247,7 +255,8 @@ function aggregate(rows: Series, g: Grain): Series {
       [token0Key]: sum(x => x[token0Key]) / n,
       [token1Key]: sum(x => x[token1Key]) / n,
       price: sum(x => x.price) / n,  vaultValue: sum(x => x.vaultValue) / n,
-      feeUSDC: sum(x => x.feeUSDC),  // sum fees within bucket
+      [feeKey]: sum(x => x[feeKey] || 0),  // sum fees within bucket
+      [almFeeKey]: sum(x => x[almFeeKey] || 0),
       lpRatio: sum(x => x.lpRatio) / n,
       prevCR:  sum(x => x.prevCR) / n, afterCR: sum(x => x.afterCR) / n,
       // For accumulated swap fees, take the last value in the bucket
@@ -319,6 +328,7 @@ function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: 
     <div class="card"><h2>${payload.volatileSymbol} vs ${payload.stableSymbol} Share</h2><div id="shares"></div></div>
     <div class="card"><h2>Collateral Ratio (target 200%)</h2><div id="cr"></div></div>
     <div class="card"><h2>Accumulated Swap Fee Cost</h2><div id="fees"></div></div>
+      <div class="card"><h2>Accumulated Swap Fee cost on active rebalances</h2><div id="almFees"></div></div>
     <div class="card"><h2>Swap fees collected</h2><div id="swapFeesCollected"></div></div>
     <div class="card"><h2>Impermanent Loss vs ${payload.volatileSymbol} Hold Strategy</h2><div id="realizedIL"></div></div>
     <div class="card"><h2>Position Range Widths</h2><div id="widths"></div></div>
@@ -396,6 +406,21 @@ function rangesSeries(data){
   const wideUpper = { ...hoverLines, name:'Wide range',  x, y:data.map(d=>d.wide1),  fill:'tonexty', line:{color:'var(--band-gray)'} };
 
   return [wideLower, wideUpper, baseLower, baseUpper, limitLower, limitUpper];
+}
+
+function almFeesSeries(data){
+  const x = xDates(data);
+  const key = \`almFee\${PAYLOAD.stableSymbol}\`;
+  const cumFees = [];
+  let acc = 0;
+  for (const d of data){ acc += d[key] || 0; cumFees.push(acc); }
+  const pct = data.map((d,i) => d.vaultValue ? (cumFees[i] / d.vaultValue) : 0);
+
+  return [
+    { ...hoverLines, name:\`Active rebalance cumulative fees (\${PAYLOAD.stableSymbol})\`, x, y:cumFees, line:{color:'#7c3aed'} },
+    { ...hoverLines, name:'Fees as % of position', x, y:pct, yaxis:'y2', line:{color:'#f97316'},
+      hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>%{y:.2f}%<extra></extra>' }
+  ];
 }
 
 function sharesSeries(data){
@@ -563,6 +588,7 @@ function render(grain='raw'){
   Plotly.react('shares', sharesSeries(data),        layout(\`\${PAYLOAD.volatileSymbol} vs \${PAYLOAD.stableSymbol} share\`, '% of portfolio'));
   Plotly.react('cr',     crSeries(data),            crLayout(data));
   Plotly.react('fees',   feesSeries(data),          layout(\`Accumulated swap fee cost paid on DLV rebalances\`, PAYLOAD.stableSymbol, '% of position'));
+  Plotly.react('almFees', almFeesSeries(data),      layout(\`Accumulated Swap Fee cost on active rebalances\`, PAYLOAD.stableSymbol, '% of position'));
   Plotly.react('swapFeesCollected', swapFeesCollectedSeries(data), layout('Swap fees collected', 'USD', '% of position'));
   Plotly.react('realizedIL', realizedILSeries(data), layout(\`Impermanent Loss vs \${PAYLOAD.volatileSymbol} Hold Strategy\`, 'IL %', PAYLOAD.stableSymbol));
   Plotly.react('portfolio', portfolioValueSeries(data), layout(\`Portfolio value breakdown\`, \`Value (\${PAYLOAD.stableSymbol})\`));

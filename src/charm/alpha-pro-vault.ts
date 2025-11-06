@@ -7,7 +7,7 @@ import {SqrtPriceMath} from "@bella-defintech/uniswap-v3-simulator/dist/util/Sqr
 import { Big, VaultParams, JSBI } from "./types";
 import { Engine } from "../engine";
 import { MANAGER, Q96, ALLOWED_DUST0, ALLOWED_DUST1 } from "../internal_constants";
-import { dlvConfig, targetCR } from "../../config";
+import { dlvConfig, targetCR, debtToVolatileSwapFee } from "../../config";
 import { PoolConfigManager, getCurrentPoolConfig } from "../pool-config";
 import {
   ensure,
@@ -35,6 +35,13 @@ import {
 } from "../utils";
 
 /** ---------- Vault ---------- */
+
+export interface ExternalRebalanceParams {
+  isZeroForOne: boolean;
+  sentAmount: JSBI;
+  minRebalanceOut: JSBI;
+}
+
 export class AlphaProVault {
   pool: CorePoolView;
   private vaultAddress!: string; // for pool calls
@@ -388,129 +395,225 @@ export class AlphaProVault {
     return { actualAmount0: out0, actualAmount1: out1 };
   }
 
-  /** Rebalance: full withdraw, set new ranges, redeploy */
-  // === rebalance() ==============================================================
-  async rebalance(engine: Engine): Promise<void> {
-    await this._assertCanRebalance();
-    
-    // Check the pool config for debugging
+  /** Rebalance: full withdraw, optional swap, set new ranges, redeploy */
+  private _logRebalanceStart(label: string): void {
     const poolConfig = getCurrentPoolConfig();
-    console.log(`[REBALANCE START] Pool: ${poolConfig.getDisplayName()}`);
-    console.log(`[REBALANCE START] Idle0: ${this.idle0.toString()}, Idle1: ${this.idle1.toString()}`);
-    console.log(`[REBALANCE START] Pool tick: ${this.pool.tickCurrent}, sqrtPrice: ${this.pool.sqrtPriceX96.toString()}`);
-  
-    // -------------------- withdraw everything --------------------
+    console.log(`[${label} START] Pool: ${poolConfig.getDisplayName()}`);
+    console.log(`[${label} START] Idle0: ${this.idle0.toString()}, Idle1: ${this.idle1.toString()}`);
+    console.log(`[${label} START] Pool tick: ${this.pool.tickCurrent}, sqrtPrice: ${this.pool.sqrtPriceX96.toString()}`);
+  }
+
+  private async _withdrawAllLiquidity(engine: Engine): Promise<void> {
     const ranges: Array<[number, number]> = [
       [this.wideLower, this.wideUpper],
       [this.baseLower, this.baseUpper],
       [this.limitLower, this.limitUpper],
     ];
-  
-    // Burn & collect all, accounting only manager fee on FEES (not principal)
+
     for (const [lo, hi] of ranges) {
       const pos = this.pool.getPosition(this.vaultAddress, lo, hi);
       if (eq(pos.liquidity, ZERO)) continue;
-        const { amount0: burned0, amount1: burned1 } = await engine.burn(this.vaultAddress, lo, hi, pos.liquidity);
-        const { amount0: coll0, amount1: coll1 } =
-          await engine.collect(this.vaultAddress, lo, hi, MAX_UINT128, MAX_UINT128);
+      const { amount0: burned0, amount1: burned1 } =
+        await engine.burn(this.vaultAddress, lo, hi, pos.liquidity);
+      const { amount0: coll0, amount1: coll1 } =
+        await engine.collect(this.vaultAddress, lo, hi, MAX_UINT128, MAX_UINT128);
 
-        // assert collect covers principal
-        ensure(JSBI.greaterThanOrEqual(coll0, burned0) && JSBI.greaterThanOrEqual(coll1, burned1),
-          "collect < burned (fees can't be negative)", { coll0: coll0.toString(), burned0: burned0.toString(), coll1: coll1.toString(), burned1: burned1.toString() }
-        );
+      ensure(JSBI.greaterThanOrEqual(coll0, burned0) && JSBI.greaterThanOrEqual(coll1, burned1),
+        "collect < burned (fees can't be negative)",
+        {
+          coll0: coll0.toString(),
+          burned0: burned0.toString(),
+          coll1: coll1.toString(),
+          burned1: burned1.toString(),
+        },
+      );
 
-        // split fees and accrue manager
-        const feesAll0 = sub(coll0, burned0);
-        const feesAll1 = sub(coll1, burned1);
-        const m0 = div(mul(feesAll0, this.managerFee), HUNDRED_PERCENT);
-        const m1 = div(mul(feesAll1, this.managerFee), HUNDRED_PERCENT);
-        this.accruedManagerFees0 = add(this.accruedManagerFees0, m0);
-        this.accruedManagerFees1 = add(this.accruedManagerFees1, m1);
+      const feesAll0 = sub(coll0, burned0);
+      const feesAll1 = sub(coll1, burned1);
+      const m0 = div(mul(feesAll0, this.managerFee), HUNDRED_PERCENT);
+      const m1 = div(mul(feesAll1, this.managerFee), HUNDRED_PERCENT);
+      this.accruedManagerFees0 = add(this.accruedManagerFees0, m0);
+      this.accruedManagerFees1 = add(this.accruedManagerFees1, m1);
 
-        // net fees
-        const net0 = sub(feesAll0, m0);
-        const net1 = sub(feesAll1, m1);
+      const net0 = sub(feesAll0, m0);
+      const net1 = sub(feesAll1, m1);
+      this.accumulatedSwapFees0 = add(this.accumulatedSwapFees0, net0);
+      this.accumulatedSwapFees1 = add(this.accumulatedSwapFees1, net1);
 
-        // update fee trackers with ACTUAL net fees
-        this.accumulatedSwapFees0 = add(this.accumulatedSwapFees0, net0);
-        this.accumulatedSwapFees1 = add(this.accumulatedSwapFees1, net1);
-
-        // collected tokens (principal + fees) return to idle balances
-        this.idle0 = add(this.idle0, coll0);
-        this.idle1 = add(this.idle1, coll1);
+      this.idle0 = add(this.idle0, coll0);
+      this.idle1 = add(this.idle1, coll1);
     }
-  
-    // === Ground-truth snapshot (no per-range rounding) =========================
-    // Everything is now in idle balances; these raw numbers are the invariant.
+  }
+
+  private _swapImbalance(
+    params: ExternalRebalanceParams,
+    label: string,
+  ): JSBI {
+    const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
+    const balance0Before = this.getBalance0();
+    const balance1Before = this.getBalance1();
+
+    const feeFloat = Math.min(Math.max(debtToVolatileSwapFee ?? 0, 0), 1);
+    const feeDen = Number(FEE_DEN.toString());
+    const feeScaled = Math.floor(feeFloat * feeDen);
+    const feeNum = JSBI.BigInt(feeScaled);
+    const oneMinusFee = JSBI.subtract(FEE_DEN, feeNum);
+    ensure(!JSBI.lessThan(oneMinusFee, ZERO), "Swap fee exceeds denominator");
+
+    const isZeroForOne = params.isZeroForOne;
+    const available = isZeroForOne ? balance0Before : balance1Before;
+    ensure(JSBI.greaterThan(params.sentAmount, ZERO), "Swap amount must be > 0");
+    ensure(
+      JSBI.greaterThanOrEqual(available, params.sentAmount),
+      "Insufficient balance for swap",
+      {
+        available: available.toString(),
+        requested: params.sentAmount.toString(),
+      },
+    );
+
+    let amountOut: JSBI;
+    let feeValue: JSBI;
+
+    if (isZeroForOne) {
+      const sentValueStable = this.volatileToStableValue(params.sentAmount, priceWad);
+      const effectiveValue = FullMath.mulDiv(sentValueStable, oneMinusFee, FEE_DEN);
+      feeValue = sub(sentValueStable, effectiveValue);
+      ensure(JSBI.greaterThan(effectiveValue, ZERO), "Swap produced zero stable output");
+
+      this.idle0 = sub(this.idle0, params.sentAmount);
+      this.idle1 = add(this.idle1, effectiveValue);
+      amountOut = effectiveValue;
+    } else {
+      const effectiveIn = FullMath.mulDiv(params.sentAmount, oneMinusFee, FEE_DEN);
+      feeValue = sub(params.sentAmount, effectiveIn);
+      const receivedVolatile = this.stableToVolatileValue(effectiveIn, priceWad);
+      ensure(JSBI.greaterThan(receivedVolatile, ZERO), "Swap produced zero volatile output");
+
+      this.idle1 = sub(this.idle1, params.sentAmount);
+      this.idle0 = add(this.idle0, receivedVolatile);
+      amountOut = receivedVolatile;
+    }
+
+    ensure(
+      JSBI.greaterThanOrEqual(amountOut, params.minRebalanceOut),
+      "APV_InsufficientSwapOutput",
+      {
+        amountOut: amountOut.toString(),
+        minRebalanceOut: params.minRebalanceOut.toString(),
+      },
+    );
+
+    const balance0After = this.getBalance0();
+    const balance1After = this.getBalance1();
+    const totalBefore = add(this.volatileToStableValue(balance0Before, priceWad), balance1Before);
+    const totalAfter = add(this.volatileToStableValue(balance0After, priceWad), balance1After);
+    const expectedAfter = JSBI.greaterThan(totalBefore, feeValue) ? sub(totalBefore, feeValue) : ZERO;
+    const conservationDiff = JSBI.greaterThan(totalAfter, expectedAfter)
+      ? sub(totalAfter, expectedAfter)
+      : sub(expectedAfter, totalAfter);
+    ensure(
+      JSBI.lessThanOrEqual(conservationDiff, ALLOWED_DUST1),
+      "Swap conservation failed",
+      {
+        totalBefore: totalBefore.toString(),
+        totalAfter: totalAfter.toString(),
+        feeValue: feeValue.toString(),
+        conservationDiff: conservationDiff.toString(),
+        allowedDust: ALLOWED_DUST1.toString(),
+      },
+    );
+
+    const volatileValueAfter = this.volatileToStableValue(balance0After, priceWad);
+    const diff = JSBI.greaterThan(volatileValueAfter, balance1After)
+      ? sub(volatileValueAfter, balance1After)
+      : sub(balance1After, volatileValueAfter);
+    const reference = JSBI.greaterThan(volatileValueAfter, balance1After) ? volatileValueAfter : balance1After;
+    const ratioTol = FullMath.mulDiv(reference, JSBI.BigInt(1), JSBI.BigInt(10_000)); // 0.01%
+    ensure(
+      JSBI.lessThanOrEqual(diff, ratioTol),
+      "Post-swap holdings deviate from 50:50 expectation",
+      {
+        volatileValueAfter: volatileValueAfter.toString(),
+        stableAfter: balance1After.toString(),
+        diff: diff.toString(),
+        ratioTol: ratioTol.toString(),
+      },
+    );
+
+    console.log(
+      `[${label} SWAP] direction=${isZeroForOne ? "0->1" : "1->0"}, sent=${params.sentAmount.toString()}, ` +
+      `received=${amountOut.toString()}, fee=${feeValue.toString()}`,
+    );
+    console.log(
+      `[${label} SWAP] Idle0:${this.idle0.toString()} Idle1:${this.idle1.toString()}`,
+    );
+
+    return feeValue;
+  }
+
+  private async _rebalanceFromIdle(engine: Engine, label: string): Promise<void> {
     const idle0Before = this.getBalance0();
     const idle1Before = this.getBalance1();
-    const sqrtBefore  = this.pool.sqrtPriceX96;
-    const lpBefore    = this._lpRatioFromRaw(idle0Before, idle1Before, sqrtBefore);
-  
-    // -------------------- compute new ranges -----------------------------------
+    const sqrtBefore = this.pool.sqrtPriceX96;
+    const lpBefore = this._lpRatioFromRaw(idle0Before, idle1Before, sqrtBefore);
+
     const tick = this.pool.tickCurrent;
     const tickFloor = this._floor(tick);
-    const tickCeil  = tickFloor + this.tickSpacing;
-  
+    const tickCeil = tickFloor + this.tickSpacing;
+
     this.wideLower = this._boundTick(tickFloor - this.wideThreshold, this.maxTick);
-    this.wideUpper = this._boundTick(tickCeil   + this.wideThreshold, this.maxTick);
+    this.wideUpper = this._boundTick(tickCeil + this.wideThreshold, this.maxTick);
     this.baseLower = tickFloor - this.baseThreshold;
-    this.baseUpper = tickCeil   + this.baseThreshold;
-  
+    this.baseUpper = tickCeil + this.baseThreshold;
+
     const bidLower = tickFloor - this.limitThreshold;
     const bidUpper = tickFloor;
     const askLower = tickCeil;
-    const askUpper = tickCeil   + this.limitThreshold;
-  
-    // One-time local working balances (start from idle snapshot)
+    const askUpper = tickCeil + this.limitThreshold;
+
     let balance0 = idle0Before;
     let balance1 = idle1Before;
-  
-    // Accumulate EXACT amounts consumed by mint calls (ground truth post-deploy)
     let minted0Total = ZERO;
     let minted1Total = ZERO;
-  
+
     const sqrtPriceX96 = this.pool.sqrtPriceX96;
-  
+
     const mintWithExact = async (lo: number, hi: number, liqRaw: JSBI) => {
       let liq = this._capLiquidityToBalances(lo, hi, liqRaw);
       if (eq(liq, ZERO)) return;
-    
+
       const { amount0: mint0, amount1: mint1 } =
         await engine.mint(this.vaultAddress, lo, hi, liq);
-    
-      // post-mint invariants (should never trip now)
+
       if (lt(this.idle0, mint0)) throw new Error("APV_InsufficientIdle0Balance");
       if (lt(this.idle1, mint1)) throw new Error("APV_InsufficientIdle1Balance");
-    
+
       this.idle0 = sub(this.idle0, mint0);
       this.idle1 = sub(this.idle1, mint1);
-      balance0   = sub(balance0, mint0);
-      balance1   = sub(balance1, mint1);
+      balance0 = sub(balance0, mint0);
+      balance1 = sub(balance1, mint1);
       minted0Total = add(minted0Total, mint0);
       minted1Total = add(minted1Total, mint1);
     };
-  
-    // -------------------- place wide -------------------------------------------
+
     if (gt(this.wideRangeWeight, ZERO)) {
       const wideAll = liquidityForAmounts(this.wideLower, this.wideUpper, balance0, balance1, sqrtPriceX96);
       const wideWeighted = div(mul(wideAll, this.wideRangeWeight), HUNDRED_PERCENT);
       await mintWithExact(this.wideLower, this.wideUpper, wideWeighted);
     }
-  
-    // -------------------- place base -------------------------------------------
+
     {
       const baseAll = liquidityForAmounts(this.baseLower, this.baseUpper, balance0, balance1, sqrtPriceX96);
       await mintWithExact(this.baseLower, this.baseUpper, baseAll);
     }
-  
-    // -------------------- place limit (side that fits more) --------------------
+
     {
       const bidAll = liquidityForAmounts(bidLower, bidUpper, balance0, balance1, sqrtPriceX96);
       const askAll = liquidityForAmounts(askLower, askUpper, balance0, balance1, sqrtPriceX96);
       const bid128 = toU128(bidAll);
       const ask128 = toU128(askAll);
-  
+
       if (gt(bid128, ask128)) {
         await mintWithExact(bidLower, bidUpper, bid128);
         this.limitLower = bidLower; this.limitUpper = bidUpper;
@@ -519,68 +622,135 @@ export class AlphaProVault {
         this.limitLower = askLower; this.limitUpper = askUpper;
       }
     }
-  
-    // -------------------- invariants & parity checks ---------------------------
-    // 1) Token conservation: what we minted MUST equal what we had in idle
-    const rem0 = balance0; // volatile token left idle
-    const rem1 = balance1; // stable token left idle
-  
-    // Check minted + remaining == before, within tiny dust
+
+    const rem0 = balance0;
+    const rem1 = balance1;
     const cons0 = add(minted0Total, rem0);
     const cons1 = add(minted1Total, rem1);
-    
     const diff0 = JSBI.lessThan(cons0, idle0Before) ? sub(idle0Before, cons0) : sub(cons0, idle0Before);
     const diff1 = JSBI.lessThan(cons1, idle1Before) ? sub(idle1Before, cons1) : sub(cons1, idle1Before);
-    
-    ensure(JSBI.lessThanOrEqual(diff0, ALLOWED_DUST0) && JSBI.lessThanOrEqual(diff1, ALLOWED_DUST1),
-    "Token conservation failed during rebalance", {
-      idle0Before: idle0Before.toString(),
-      idle1Before: idle1Before.toString(),
-      minted0Total: minted0Total.toString(),
-      minted1Total: minted1Total.toString(),
-      rem0: rem0.toString(),
-      rem1: rem1.toString(),
-      diff0: diff0.toString(),
-      diff1: diff1.toString(),
-      allowedDust0: ALLOWED_DUST0.toString(),
-      allowedDust1: ALLOWED_DUST1.toString(),
-    });
 
-    // 2) LP ratio parity (valuation parity). Use round-down totals to avoid
-    //    optimistic round-up drift, and compare within a small relative tolerance.
-    const { total0: newTotal0, total1: newTotal1 } = await this.getTotalAmounts(false); // roundDown
-    const lpAfter  = this._lpRatioFromRaw(newTotal0, newTotal1, this.pool.sqrtPriceX96);
+    ensure(
+      JSBI.lessThanOrEqual(diff0, ALLOWED_DUST0) && JSBI.lessThanOrEqual(diff1, ALLOWED_DUST1),
+      "Token conservation failed during rebalance",
+      {
+        idle0Before: idle0Before.toString(),
+        idle1Before: idle1Before.toString(),
+        minted0Total: minted0Total.toString(),
+        minted1Total: minted1Total.toString(),
+        rem0: rem0.toString(),
+        rem1: rem1.toString(),
+        diff0: diff0.toString(),
+        diff1: diff1.toString(),
+        allowedDust0: ALLOWED_DUST0.toString(),
+        allowedDust1: ALLOWED_DUST1.toString(),
+      },
+    );
 
-    // relative tolerance = 0.10% (adjust if you still see legit red/green shuffle)
+    const { total0: newTotal0, total1: newTotal1 } = await this.getTotalAmounts(false);
+    const lpAfter = this._lpRatioFromRaw(newTotal0, newTotal1, this.pool.sqrtPriceX96);
     const absDiff = JSBI.lessThan(lpAfter, lpBefore) ? JSBI.subtract(lpBefore, lpAfter) : JSBI.subtract(lpAfter, lpBefore);
-    const tolAbs  = FullMath.mulDiv(lpBefore, JSBI.BigInt(10), JSBI.BigInt(10_000)); // 10 / 10_000 = 0.10%
-    ensure(JSBI.lessThanOrEqual(absDiff, tolAbs), "LP ratio shouldn't change after rebalance", {
-      prevLpRatio: lpBefore.toString(),
-      newLpRatio : lpAfter.toString(),
-      absDiff    : absDiff.toString(),
-      tolAbs     : tolAbs.toString(),
-      prevTotal0 : idle0Before.toString(),
-      prevTotal1 : idle1Before.toString(),
-      newTotal0  : newTotal0.toString(),
-      newTotal1  : newTotal1.toString(),
-    });
-  
-    // -------------------- bookkeeping -----------------------------------------
+    const tolAbs = FullMath.mulDiv(lpBefore, JSBI.BigInt(10), JSBI.BigInt(10_000));
+    ensure(
+      JSBI.lessThanOrEqual(absDiff, tolAbs),
+      "LP ratio shouldn't change after rebalance",
+      {
+        prevLpRatio: lpBefore.toString(),
+        newLpRatio: lpAfter.toString(),
+        absDiff: absDiff.toString(),
+        tolAbs: tolAbs.toString(),
+        prevTotal0: idle0Before.toString(),
+        prevTotal1: idle1Before.toString(),
+        newTotal0: newTotal0.toString(),
+        newTotal1: newTotal1.toString(),
+      },
+    );
+
     this.lastTimestamp = nowSeconds();
     this.lastTick = tick;
+
+    console.log(
+      `[${label} END] Idle0:${this.idle0.toString()} Idle1:${this.idle1.toString()} ` +
+      `wide:[${this.wideLower},${this.wideUpper}] base:[${this.baseLower},${this.baseUpper}] ` +
+      `limit:[${this.limitLower},${this.limitUpper}]`,
+    );
+  }
+
+  // === rebalance() ==============================================================
+  async rebalance(engine: Engine): Promise<JSBI> {
+    await this._assertCanRebalance();
+    this._logRebalanceStart("REBALANCE");
+    await this._withdrawAllLiquidity(engine);
+    await this._rebalanceFromIdle(engine, "REBALANCE");
+    return ZERO;
+  }
+
+  async activeRebalance(engine: Engine, params: ExternalRebalanceParams): Promise<JSBI> {
+    await this._assertCanRebalance();
+    this._logRebalanceStart("ACTIVE REBALANCE");
+    await this._withdrawAllLiquidity(engine);
+    const fee = this._swapImbalance(params, "ACTIVE REBALANCE");
+    await this._rebalanceFromIdle(engine, "ACTIVE REBALANCE");
+    return fee;
   }
 
   async rebalanceDebt(engine: Engine): Promise<Big> {
     const rebalanceBorrowedAmount = await this.rebalanceBorrowedAmount();
+    if (process.env.DEBUG_REBALANCE === "1") {
+      console.log("[DEBUG] rebalanceBorrowedAmount result:", JSON.stringify({
+        mode: rebalanceBorrowedAmount.mode,
+        borrowStable: (rebalanceBorrowedAmount as any).borrowStable?.toString?.() ?? null,
+        swapStableToVolatile: (rebalanceBorrowedAmount as any).swapStableToVolatile?.toString?.() ?? null,
+        volatileReceived: (rebalanceBorrowedAmount as any).volatileReceived?.toString?.() ?? null,
+        sharesToBurn: (rebalanceBorrowedAmount as any).sharesToBurn?.toString?.() ?? null,
+        withdrawStable: (rebalanceBorrowedAmount as any).withdrawStable?.toString?.() ?? null,
+        withdrawVolatile: (rebalanceBorrowedAmount as any).withdrawVolatile?.toString?.() ?? null,
+        repayStable: (rebalanceBorrowedAmount as any).repayStable?.toString?.() ?? null,
+        postCR: (rebalanceBorrowedAmount as any).postCR ?? null,
+      }));
+    }
 
     if (rebalanceBorrowedAmount.mode === "noop") return ZERO;
 
     const priceSnap = this.poolPrice(this.pool.sqrtPriceX96);
     const debt0 = this.virtualDebt;
     const A0 = await this.getTotalAmounts(false);
-
     const safeSub = (lhs: JSBI, rhs: JSBI): JSBI =>
       JSBI.lessThan(lhs, rhs) ? ZERO : sub(lhs, rhs);
+    const percentToWad = (percent: number): JSBI => {
+      const normalized = percent.toFixed(16);
+      const negative = normalized.startsWith("-");
+      const unsigned = negative ? normalized.slice(1) : normalized;
+      const [integerPart, fractionalPart = ""] = unsigned.split(".");
+      const paddedFraction = fractionalPart.padEnd(16, "0");
+      const digits = `${integerPart}${paddedFraction}`.replace(/^0+(?=\d)/, "");
+      const signedDigits = negative ? `-${digits || "0"}` : digits || "0";
+      return JSBI.BigInt(signedDigits);
+    };
+
+    const wadToPercent = (wadValue: JSBI): number => {
+      const raw = wadValue.toString();
+      const negative = raw.startsWith("-");
+      const unsigned = negative ? raw.slice(1) : raw;
+      const intLen = unsigned.length > 16 ? unsigned.length - 16 : 0;
+      const integerPart = intLen > 0 ? unsigned.slice(0, intLen) : "0";
+      const fractionalPart = unsigned.slice(intLen).padStart(16, "0");
+      const formatted = `${integerPart}.${fractionalPart}`;
+      const numeric = Number(formatted);
+      return negative ? -numeric : numeric;
+    };
+
+    const candidatePercent =
+      rebalanceBorrowedAmount.mode === "leverage" || rebalanceBorrowedAmount.mode === "deleverage"
+        ? rebalanceBorrowedAmount.postCR
+        : undefined;
+
+    const useCandidate = candidatePercent !== undefined && Number.isFinite(candidatePercent) && candidatePercent > 0;
+
+    let targetCrPercent = useCandidate ? candidatePercent! : wadToPercent(targetCR);
+    let targetCrWad = useCandidate ? percentToWad(targetCrPercent) : targetCR;
+
+    let planMutated = false;
     
     if (rebalanceBorrowedAmount.mode === "leverage") {
       const stableDeposit  = safeSub(
@@ -659,22 +829,26 @@ export class AlphaProVault {
           if (gt(volatileDelta, ZERO)) {
             const extraVolatileInStable = this.volatileToStableValue(volatileDelta, priceSnap);
             actualDebtDecrease = add(actualDebtDecrease, extraVolatileInStable);
+            planMutated = true;
           } else if (lt(volatileDelta, ZERO)) {
-            // Less volatile withdrawn than expected, reduce debt decrease
-            const missingVolatileInStable = this.volatileToStableValue(JSBI.multiply(volatileDelta, JSBI.BigInt(-1)), priceSnap);
+            const missingVolatile = JSBI.multiply(volatileDelta, JSBI.BigInt(-1));
+            const missingVolatileInStable = this.volatileToStableValue(missingVolatile, priceSnap);
             actualDebtDecrease = gt(actualDebtDecrease, missingVolatileInStable) 
               ? sub(actualDebtDecrease, missingVolatileInStable) 
               : ZERO;
+            planMutated = true;
           }
 
           // Adjust for any stable delta directly
           if (gt(stableDelta, ZERO)) {
             actualDebtDecrease = add(actualDebtDecrease, stableDelta);
+            planMutated = true;
           } else if (lt(stableDelta, ZERO)) {
             const missingStable = JSBI.multiply(stableDelta, JSBI.BigInt(-1));
             actualDebtDecrease = gt(actualDebtDecrease, missingStable) 
               ? sub(actualDebtDecrease, missingStable) 
               : ZERO;
+            planMutated = true;
           }
 
         } catch (error) {
@@ -685,44 +859,17 @@ export class AlphaProVault {
           throw error; // Re-throw other errors
         }
       }
+
+      if (JSBI.greaterThan(actualDebtDecrease, this.virtualDebt)) {
+        actualDebtDecrease = this.virtualDebt;
+        planMutated = true;
+      }
+
       const repay = actualDebtDecrease;
       console.log("Rebalance debt: repaying " + repay.toString() + " stable tokens of " + this.virtualDebt.toString() + " virtual debt");
       this.virtualDebt = sub(this.virtualDebt, repay);
     }
     const A1 = await this.getTotalAmounts(false);
-
-    const percentToWad = (percent: number): JSBI => {
-      const normalized = percent.toFixed(16);
-      const negative = normalized.startsWith("-");
-      const unsigned = negative ? normalized.slice(1) : normalized;
-      const [integerPart, fractionalPart = ""] = unsigned.split(".");
-      const paddedFraction = fractionalPart.padEnd(16, "0");
-      const digits = `${integerPart}${paddedFraction}`.replace(/^0+(?=\d)/, "");
-      const signedDigits = negative ? `-${digits || "0"}` : digits || "0";
-      return JSBI.BigInt(signedDigits);
-    };
-
-    const wadToPercent = (wadValue: JSBI): number => {
-      const raw = wadValue.toString();
-      const negative = raw.startsWith("-");
-      const unsigned = negative ? raw.slice(1) : raw;
-      const intLen = unsigned.length > 16 ? unsigned.length - 16 : 0;
-      const integerPart = intLen > 0 ? unsigned.slice(0, intLen) : "0";
-      const fractionalPart = unsigned.slice(intLen).padStart(16, "0");
-      const formatted = `${integerPart}.${fractionalPart}`;
-      const numeric = Number(formatted);
-      return negative ? -numeric : numeric;
-    };
-
-    const candidatePercent =
-      rebalanceBorrowedAmount.mode === "leverage" || rebalanceBorrowedAmount.mode === "deleverage"
-        ? rebalanceBorrowedAmount.postCR
-        : undefined;
-
-    const useCandidate = candidatePercent !== undefined && Number.isFinite(candidatePercent) && candidatePercent > 0;
-
-    let targetCrPercent = useCandidate ? candidatePercent : wadToPercent(targetCR);
-    let targetCrWad = useCandidate ? percentToWad(targetCrPercent) : targetCR;
 
     const pv = (totals: {total0:JSBI,total1:JSBI}, debt: JSBI) => {
       const volatileValueInStable = this.volatileToStableValue(totals.total0, priceSnap);
@@ -741,6 +888,9 @@ export class AlphaProVault {
     const crWad       = await this._collateralRatioWad(false);
 
     if (JSBI.equal(this.virtualDebt, ZERO)) {
+      targetCrWad = crWad;
+      targetCrPercent = wadToPercent(crWad);
+    } else if (planMutated) {
       targetCrWad = crWad;
       targetCrPercent = wadToPercent(crWad);
     }
@@ -831,26 +981,14 @@ export class AlphaProVault {
   }
 
   // Legacy methods for backwards compatibility
-  // Stable token raw from volatile token raw using RAW ratio price (token1Raw per token0Raw)
+  // Stable token raw from volatile token raw using pool-config aware price
   volatileToStableValue(volatileRaw: JSBI, priceWadRaw: JSBI): JSBI {
-    // Generic: volatile token = token0, stable token = token1
     return this.volatileToStable(volatileRaw, priceWadRaw);
   }
   
-  // Legacy method name for backwards compatibility
-  btcRawToUsdcRaw(btcRaw: JSBI, priceWadRaw: JSBI): JSBI {
-    return this.volatileToStableValue(btcRaw, priceWadRaw);
-  }
-  
-  // Volatile token raw from stable token raw using RAW ratio price (token1Raw per token0Raw)
+  // Volatile token raw from stable token raw using pool-config aware price
   stableToVolatileValue(stableRaw: JSBI, priceWadRaw: JSBI): JSBI {
-    // Generic: stable token = token1, volatile token = token0
     return this.stableToVolatile(stableRaw, priceWadRaw);
-  }
-  
-  // Legacy method name for backwards compatibility
-  usdcRawToBtcRaw(usdcRaw: JSBI, priceWadRaw: JSBI): JSBI {
-    return this.stableToVolatileValue(usdcRaw, priceWadRaw);
   }
 
   async totalPoolValue(): Promise<JSBI> {
@@ -860,11 +998,21 @@ export class AlphaProVault {
     return sub(add(total1, volatileValueInStable), this.virtualDebt);
   }
 
-  // price in WAD (stable per volatile token), no float loss; identical to (sqrtP^2 / Q96^2) * 1e18
+  // price in WAD (stable per volatile token), agnostic to token ordering; identical to (sqrtP^2 / Q96^2) * 1e18
   poolPrice(sqrtPriceX96: JSBI): JSBI {
     const priceX192 = JSBI.multiply(sqrtPriceX96, sqrtPriceX96);
-    // priceWad = priceX192 / 2^192 * 1e18  ==  mulDiv(priceX192, WAD, Q96*Q96)
-    return FullMath.mulDiv(priceX192, WAD, JSBI.multiply(Q96, Q96)); // Price with token decimal adjustment
+    // token1 per token0 (WAD)  ==  mulDiv(priceX192, WAD, Q96*Q96)
+    const token1PerToken0Wad = FullMath.mulDiv(priceX192, WAD, JSBI.multiply(Q96, Q96));
+
+    // Ensure we return stable per volatile regardless of which slot holds which role.
+    if (this.poolConfig.isVolatileToken0()) {
+      // volatile == token0, stable == token1 → token1/token0 already stable per volatile
+      return token1PerToken0Wad;
+    }
+
+    // volatile == token1, stable == token0 → invert to get stable per volatile
+    ensure(!eq(token1PerToken0Wad, ZERO), "Pool price undefined (token1/token0 == 0)");
+    return FullMath.mulDiv(WAD, WAD, token1PerToken0Wad);
   }
 
   private _lpRatioFromRaw(total0: JSBI, total1: JSBI, sqrtPriceX96: JSBI): JSBI {

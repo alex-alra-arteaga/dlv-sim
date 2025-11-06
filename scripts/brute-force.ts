@@ -8,6 +8,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
+import { configLookUpPeriod } from "../config";
+
 type Level = "air" | "light" | "standard" | "heavy" | "extreme";
 type Range<T> = T[];
 
@@ -260,6 +262,12 @@ function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolea
       horizonSeconds: 600,
       pythonExecutable: workerVenvPath,
       inferencePath: inferencePath,
+    }),
+    BF_ALM_AGENT_JSON: JSON.stringify({
+      horizonSteps: 1000,
+      stepSeconds: configLookUpPeriod,
+      pythonExecutable: workerVenvPath,
+      inferencePath: path.join(baseDir, "agents", "alm", "inference.py"),
     }),
   } as NodeJS.ProcessEnv;
 

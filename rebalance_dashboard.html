@@ -50,6 +50,7 @@
     <div class="card"><h2>WBTC vs USDC Share</h2><div id="shares"></div></div>
     <div class="card"><h2>Collateral Ratio (target 200%)</h2><div id="cr"></div></div>
     <div class="card"><h2>Accumulated Swap Fee Cost</h2><div id="fees"></div></div>
+      <div class="card"><h2>Accumulated Swap Fee cost on active rebalances</h2><div id="almFees"></div></div>
     <div class="card"><h2>Swap fees collected</h2><div id="swapFeesCollected"></div></div>
     <div class="card"><h2>Impermanent Loss vs WBTC Hold Strategy</h2><div id="realizedIL"></div></div>
     <div class="card"><h2>Position Range Widths</h2><div id="widths"></div></div>
@@ -127,6 +128,21 @@ function rangesSeries(data){
   const wideUpper = { ...hoverLines, name:'Wide range',  x, y:data.map(d=>d.wide1),  fill:'tonexty', line:{color:'var(--band-gray)'} };
 
   return [wideLower, wideUpper, baseLower, baseUpper, limitLower, limitUpper];
+}
+
+function almFeesSeries(data){
+  const x = xDates(data);
+  const key = `almFee${PAYLOAD.stableSymbol}`;
+  const cumFees = [];
+  let acc = 0;
+  for (const d of data){ acc += d[key] || 0; cumFees.push(acc); }
+  const pct = data.map((d,i) => d.vaultValue ? (cumFees[i] / d.vaultValue) : 0);
+
+  return [
+    { ...hoverLines, name:`Active rebalance cumulative fees (${PAYLOAD.stableSymbol})`, x, y:cumFees, line:{color:'#7c3aed'} },
+    { ...hoverLines, name:'Fees as % of position', x, y:pct, yaxis:'y2', line:{color:'#f97316'},
+      hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>%{y:.2f}%<extra></extra>' }
+  ];
 }
 
 function sharesSeries(data){
@@ -294,6 +310,7 @@ function render(grain='raw'){
   Plotly.react('shares', sharesSeries(data),        layout(`${PAYLOAD.volatileSymbol} vs ${PAYLOAD.stableSymbol} share`, '% of portfolio'));
   Plotly.react('cr',     crSeries(data),            crLayout(data));
   Plotly.react('fees',   feesSeries(data),          layout(`Accumulated swap fee cost paid on DLV rebalances`, PAYLOAD.stableSymbol, '% of position'));
+  Plotly.react('almFees', almFeesSeries(data),      layout(`Accumulated Swap Fee cost on active rebalances`, PAYLOAD.stableSymbol, '% of position'));
   Plotly.react('swapFeesCollected', swapFeesCollectedSeries(data), layout('Swap fees collected', 'USD', '% of position'));
   Plotly.react('realizedIL', realizedILSeries(data), layout(`Impermanent Loss vs ${PAYLOAD.volatileSymbol} Hold Strategy`, 'IL %', PAYLOAD.stableSymbol));
   Plotly.react('portfolio', portfolioValueSeries(data), layout(`Portfolio value breakdown`, `Value (${PAYLOAD.stableSymbol})`));

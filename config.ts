@@ -7,7 +7,8 @@ import { setCurrentPoolConfig, WBTC_USDC_CONFIG } from "./src/pool-config";
 setCurrentPoolConfig(WBTC_USDC_CONFIG);
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
-export const isDebtNeuralRebalancing = true; // Whether to enable debt neutral rebalancing
+export const isDebtNeuralRebalancing = false; // Whether to enable debt neutral rebalancing
+export const isALMNeuralRebalancing = true; // Whether to override ALM period rebalancing with the neural agent
 export let targetCR = JSBI.BigInt(2e18); // 200% in WAD
 
 export function setTargetCR(value: JSBI) {
@@ -35,6 +36,25 @@ export const debtAgentConfig: DebtAgentConfig = (() => {
   } satisfies DebtAgentConfig;
 })();
 
+export type ALMAgentConfig = {
+  horizonSteps: number;
+  stepSeconds: number;
+  pythonExecutable?: string;
+  inferencePath?: string;
+};
+
+export const almAgentConfig: ALMAgentConfig = (() => {
+  const override = parseEnvJSON<ALMAgentConfig>("BF_ALM_AGENT_JSON");
+  if (override) return override;
+  const baseDir = process.cwd();
+  return {
+    horizonSteps: 1000,
+    stepSeconds: configLookUpPeriod,
+    pythonExecutable: `${baseDir}/agents/alm/.venv/bin/python`,
+    inferencePath: `${baseDir}/agents/alm/inference.py`,
+  } satisfies ALMAgentConfig;
+})();
+
 // Pool-agnostic vault configuration
 // These parameters work for any pool but can be adjusted per pool if needed
 /// @param: wideRangeWeight - Portion of total range allocated to wide range (in WAD, e.g. 100000 = 10%)
@@ -59,11 +79,11 @@ export const charmConfig: VaultParams = (() => {
   const override = parseEnvJSON<VaultParams>("BF_CHARM_JSON");
   if (override) return override;
   return {
-    wideRangeWeight: 100000,
-    wideThreshold: 12000,
+    wideRangeWeight: 150000,
+    wideThreshold: 7980,
     baseThreshold: 3600,
     limitThreshold: 900,
-    period: 86400,
+    period: 86400 * 2,
   } satisfies VaultParams;
 })();
 
@@ -85,11 +105,13 @@ export const dlvConfig: DLVConfig = (() => {
   if (override) return override;
   return {
     period: undefined,
-    deviationThresholdAbove: 0.1,
-    deviationThresholdBelow: 0.1,
+    deviationThresholdAbove: 0.2,
+    deviationThresholdBelow: 0.2,
     debtToVolatileSwapFee: 0.0015,
   } satisfies DLVConfig;
 })();
+
+export const debtToVolatileSwapFee = dlvConfig.debtToVolatileSwapFee;
 
 export const BORROW_RATE = undefined; // TODO
 export const managerFee = 0; // Swap fees taken by the manager (e.g. 0.1 = 10%)

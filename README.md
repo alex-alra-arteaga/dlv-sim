@@ -47,6 +47,36 @@ python -c "import torch; print(torch.__version__)"
 export BF_DEBT_AGENT_JSON='{"pythonExecutable":"'"$PWD"'/agents/debt/.venv/bin/python"}'
 ```
 
+### Enabling the ALM neural agent
+
+If you want the neural network to drive the ALM rebalancing loop (`isALMNeuralRebalancing = true` in `config.ts`), mirror the setup above for the ALM agent:
+
+```bash
+# 0. open venv
+cd agents/alm
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 1. make sure pip resolves to the venv (either unalias or call the full path)
+unalias pip 2>/dev/null || true
+
+# 2. install torch into the venv
+pip install --upgrade pip
+# For Apple Silicon CPU-only build
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# 3. verify from the same shell
+python -c "import torch; print(torch.__version__)"
+```
+
+Then point the simulator at that interpreter (from the repo root):
+
+```bash
+export BF_ALM_AGENT_JSON='{"pythonExecutable":"'"$PWD"'/agents/alm/.venv/bin/python"}'
+```
+
+With this environment variable in place you can toggle `isALMNeuralRebalancing` to `true` in `config.ts` (or via `BF_ALM_AGENT_JSON`) and the TypeScript layer will spawn the Python inference process from `agents/alm/inference.py`.
+
 ## Usage
 
 Run a simulation based on `config.ts`, for detailed information check [Configuration](#configuration):

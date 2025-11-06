@@ -9,10 +9,11 @@ import { buildStrategy, CommonVariables, Phase, Rebalance } from "../src/strateg
 import { Engine } from "../src/engine";
 import { MaxUint128 } from "../src/internal_constants";
 import { LogDBManager } from "./LogDBManager";
-import { charmConfig, dlvConfig, configLookUpPeriod, isDebtNeuralRebalancing, targetCR, setTargetCR, debtAgentConfig } from "../config";
+import { charmConfig, dlvConfig, configLookUpPeriod, isDebtNeuralRebalancing, isALMNeuralRebalancing, targetCR, setTargetCR, debtAgentConfig, almAgentConfig } from "../config";
 import { AlphaProVault } from "../src/charm/alpha-pro-vault";
 import { getCurrentPoolConfig, PoolConfigManager } from "../src/pool-config";
 import { DebtNeuralAgent } from "../src/neural-agent/debt-neural-agent";
+import { ALMNeuralAgent } from "../src/neural-agent/alm-neural-agent";
 
 export interface RebalanceLog {
   wide0: number;
@@ -28,6 +29,7 @@ export interface RebalanceLog {
   afterTotalPoolValue: BN;
   lpRatio: BN;
   swapFeeStable: BN;
+  almSwapFeeStable?: BN;
   prevCollateralRatio: BN;
   afterCollateralRatio: BN;
   accumulatedSwapFees0: BN;
@@ -90,6 +92,7 @@ describe("DLV Strategy", function () {
     // Array to collect data points for APY calculation
     const rebalanceLog: Array<{t: number, vaultValue: number, price: number}> = [];
     const debtNeuralAgent = new DebtNeuralAgent(debtAgentConfig);
+    const almNeuralAgent = new ALMNeuralAgent(almAgentConfig);
     
     // IL tracking variables - track values between consecutive periods
     let previousAfterTotalPoolValue: JSBI | null = null; // <-- GAV at end of previous interval
@@ -129,6 +132,14 @@ describe("DLV Strategy", function () {
           const count = (variable.get(TICK_COUNT) as number) ?? 0;
 
           if (rebalance === Rebalance.ALM) {
+            if (isALMNeuralRebalancing) {
+              const decision = await almNeuralAgent.shouldRebalance({
+                vault,
+                metadata: variable as Map<string, unknown>,
+              });
+              console.log(`[ALM Neural Agent] Decision: ${decision ? "rebalance" : "skip"}`);
+              return decision;
+            }
             return count % charmRebalancePeriod === 0;
           }
 
@@ -279,8 +290,9 @@ const act = async function (
       console.log("[REB] willRebalance:", willRebalance);
 
       let swapFeeUSDC = JSBI.BigInt(0);
+      let almSwapFeeUSDC = JSBI.BigInt(0);
       if (rebalance === Rebalance.ALM) {
-        await vault.rebalance(engine);
+        almSwapFeeUSDC = await vault.rebalance(engine);
         variable.set(ALM_CALLS, ((variable.get(ALM_CALLS) as number) ?? 0) + 1);
       } else if (rebalance === Rebalance.DLV) {
         swapFeeUSDC = await vault.rebalanceDebt(engine); // consums internally global variable 'targetCR'
@@ -323,6 +335,7 @@ const act = async function (
         afterTotalPoolValue: safeToBN(currentTotalValueUSDC),   // NAV_t_end
         lpRatio: safeToBN(await vault.lpRatio(true)),
         swapFeeStable: safeToBN(swapFeeUSDC),
+        almSwapFeeStable: safeToBN(almSwapFeeUSDC),
         prevCollateralRatio,
         afterCollateralRatio,
         accumulatedSwapFees0: safeToBN(accumulatedSwapFeesRaw.fees0),
@@ -414,6 +427,7 @@ const act = async function (
     } finally {
       await strategy.shutdown();
       await debtNeuralAgent.shutdown();
+      await almNeuralAgent.shutdown();
     }
   });
 });

@@ -59,6 +59,7 @@ export class DebtNeuralAgent {
   private closed = false;
   private readonly inferenceScript: string;
   private history: Observation[] = [];
+  private inferenceFailed = false;
 
   constructor(private readonly options: DebtNeuralAgentOptions = DEFAULT_OPTIONS) {
     this.topLeverage = options.topLeverage ?? DEFAULT_OPTIONS.topLeverage;
@@ -80,10 +81,22 @@ export class DebtNeuralAgent {
     const obsVector = this.buildFeatureVector();
     if (!obsVector) return DEFAULT_TARGET_CR;
 
-    const action = await this.runInference(obsVector);
-    const targetLeverage = this.leverageForAction(action);
-    if (targetLeverage === null) return null;
-    return this.targetCrFromLeverage(targetLeverage);
+    if (this.inferenceFailed) return DEFAULT_TARGET_CR;
+
+    try {
+      const action = await this.runInference(obsVector);
+      const targetLeverage = this.leverageForAction(action);
+      if (targetLeverage === null) return null;
+      return this.targetCrFromLeverage(targetLeverage);
+    } catch (error) {
+      this.inferenceFailed = true;
+      console.warn(
+        "[DebtNeuralAgent] falling back to default target CR after inference failure:",
+        (error as Error)?.message ?? error
+      );
+      await this.shutdown().catch(() => undefined);
+      return DEFAULT_TARGET_CR;
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -267,6 +280,9 @@ export class DebtNeuralAgent {
   }
 
   private async runInference(features: number[]): Promise<number> {
+    if (this.inferenceFailed) {
+      return Promise.reject(new Error("Inference unavailable"));
+    }
     if (!this.python) this.initializeProcess();
 
     return new Promise<number>((resolve, reject) => {
