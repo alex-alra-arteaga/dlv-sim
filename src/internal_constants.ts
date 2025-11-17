@@ -36,7 +36,6 @@ export const TICK_SPACINGS: { [amount in FeeAmount]: number } = {
 };
 
 export const MANAGER = "0xB333Cc6898ddc72C4E529103e771b7A5a84fAFBc"; // Random
-export const TARGET_CR = JSBI.BigInt(2e18); // 200% in WAD
 
 // Tiny per-token dust tolerances in raw units (token native decimals)
 export const ALLOWED_DUST0 = JSBI.BigInt(10);    // ≤ 10 units of volatile token (pool-specific)

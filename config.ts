@@ -1,12 +1,59 @@
-import { VaultParams } from "./src/charm/types";
+import { JSBI, VaultParams } from "./src/charm/types";
 import { LookUpPeriod } from "./src/enums";
-import { setCurrentPoolConfig, ETH_USDT_CONFIG } from "./src/pool-config";
+import { setCurrentPoolConfig, WBTC_USDC_CONFIG } from "./src/pool-config";
 
 // Initialize the pool configuration (this will be used throughout the application)
 // To use a different pool, change this line to import and set a different configuration
-setCurrentPoolConfig(ETH_USDT_CONFIG);
+setCurrentPoolConfig(WBTC_USDC_CONFIG);
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
+export const isDebtNeuralRebalancing = false; // Whether to enable debt neutral rebalancing
+export const isALMNeuralRebalancing = true; // Whether to override ALM period rebalancing with the neural agent
+export let targetCR = JSBI.BigInt(2e18); // 200% in WAD
+
+export function setTargetCR(value: JSBI) {
+  targetCR = value;
+}
+
+export type DebtAgentConfig = {
+  topLeverage: number;
+  bottomLeverage: number;
+  horizonSeconds: number;
+  pythonExecutable?: string;
+  inferencePath?: string;
+};
+
+export const debtAgentConfig: DebtAgentConfig = (() => {
+  const override = parseEnvJSON<DebtAgentConfig>("BF_DEBT_AGENT_JSON");
+  if (override) return override;
+  const baseDir = process.cwd();
+  return {
+    topLeverage: 2.2,
+    bottomLeverage: 1.8,
+    horizonSeconds: 600,
+    pythonExecutable: `${baseDir}/agents/debt/.venv/bin/python`,
+    inferencePath: `${baseDir}/agents/debt/inference.py`,
+  } satisfies DebtAgentConfig;
+})();
+
+export type ALMAgentConfig = {
+  horizonSteps: number;
+  stepSeconds: number;
+  pythonExecutable?: string;
+  inferencePath?: string;
+};
+
+export const almAgentConfig: ALMAgentConfig = (() => {
+  const override = parseEnvJSON<ALMAgentConfig>("BF_ALM_AGENT_JSON");
+  if (override) return override;
+  const baseDir = process.cwd();
+  return {
+    horizonSteps: 1000,
+    stepSeconds: configLookUpPeriod,
+    pythonExecutable: `${baseDir}/agents/alm/.venv/bin/python`,
+    inferencePath: `${baseDir}/agents/alm/inference.py`,
+  } satisfies ALMAgentConfig;
+})();
 
 // Pool-agnostic vault configuration
 // These parameters work for any pool but can be adjusted per pool if needed
@@ -36,7 +83,7 @@ export const charmConfig: VaultParams = (() => {
     wideThreshold: 7980,
     baseThreshold: 3600,
     limitThreshold: 900,
-    period: 172800,
+    period: 86400 * 2,
   } satisfies VaultParams;
 })();
 
@@ -63,6 +110,8 @@ export const dlvConfig: DLVConfig = (() => {
     debtToVolatileSwapFee: 0.0015,
   } satisfies DLVConfig;
 })();
+
+export const debtToVolatileSwapFee = dlvConfig.debtToVolatileSwapFee;
 
 export const BORROW_RATE = undefined; // TODO
 export const managerFee = 0; // Swap fees taken by the manager (e.g. 0.1 = 10%)

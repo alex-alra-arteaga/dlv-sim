@@ -1,17 +1,19 @@
 import JSBI from "jsbi";
 import {
-  CorePoolView,
   EventDBManager,
+  getDate
 } from "@bella-defintech/uniswap-v3-simulator";
 import { safeToBN } from "../src/utils";
 import { BigNumber as BN } from "ethers";
 import { buildStrategy, CommonVariables, Phase, Rebalance } from "../src/strategy";
 import { Engine } from "../src/engine";
-import { MaxUint128, TARGET_CR } from "../src/internal_constants";
+import { MaxUint128 } from "../src/internal_constants";
 import { LogDBManager } from "./LogDBManager";
-import { charmConfig, dlvConfig, configLookUpPeriod } from "../config";
+import { charmConfig, dlvConfig, configLookUpPeriod, isDebtNeuralRebalancing, isALMNeuralRebalancing, targetCR, setTargetCR, debtAgentConfig, almAgentConfig } from "../config";
 import { AlphaProVault } from "../src/charm/alpha-pro-vault";
 import { getCurrentPoolConfig, PoolConfigManager } from "../src/pool-config";
+import { DebtNeuralAgent } from "../src/neural-agent/debt-neural-agent";
+import { ALMNeuralAgent } from "../src/neural-agent/alm-neural-agent";
 
 export interface RebalanceLog {
   wide0: number;
@@ -27,6 +29,7 @@ export interface RebalanceLog {
   afterTotalPoolValue: BN;
   lpRatio: BN;
   swapFeeStable: BN;
+  almSwapFeeStable?: BN;
   prevCollateralRatio: BN;
   afterCollateralRatio: BN;
   accumulatedSwapFees0: BN;
@@ -88,11 +91,13 @@ describe("DLV Strategy", function () {
     
     // Array to collect data points for APY calculation
     const rebalanceLog: Array<{t: number, vaultValue: number, price: number}> = [];
+    const debtNeuralAgent = new DebtNeuralAgent(debtAgentConfig);
+    const almNeuralAgent = new ALMNeuralAgent(almAgentConfig);
     
     // IL tracking variables - track values between consecutive periods
     let previousAfterTotalPoolValue: JSBI | null = null; // <-- GAV at end of previous interval
     let previousTotalAmounts: { total0: JSBI; total1: JSBI } | null = null;
-    let previousAccumulatedSwapFees: { fees0: JSBI; fees1: JSBI } | null = null;
+    let previousTotalSwapFees: { fees0: JSBI; fees1: JSBI } | null = null;
     
     // set priceWindow for strategy
     if (charmConfig.period % configLookUpPeriod !== 0) {
@@ -108,9 +113,8 @@ describe("DLV Strategy", function () {
     let charmRebalancePeriod = charmConfig.period / configLookUpPeriod;
     let dlvRebalancePeriod = dlvConfig.period ? dlvConfig.period / configLookUpPeriod : Number(MaxUint128);
 
-    let startDate = poolConfig.getStartDate();
-    let endDate = poolConfig.getEndDate();
-    console.log('Start date:', startDate, 'End date:', endDate);
+    let startDate = getDate(2021, 5, 6);
+    let endDate = getDate(2024, 12, 15);
 
     // // For brute-force testing, use shorter period to speed up execution
     // if (process.env.BRUTE_FORCE === 'true') {
@@ -120,21 +124,36 @@ describe("DLV Strategy", function () {
     let trigger = async function (
       phase: Phase,
       rebalance: Rebalance,
-      _corePoolView: CorePoolView,
       vault: AlphaProVault,
       variable: Map<string, any>
     ) {
       switch (phase) {
         case Phase.AFTER_NEW_TIME_PERIOD: {
           const count = (variable.get(TICK_COUNT) as number) ?? 0;
-          console.log('Volatile price: ', vault.poolPrice(_corePoolView.sqrtPriceX96).toString());
 
           if (rebalance === Rebalance.ALM) {
+            if (isALMNeuralRebalancing) {
+              const decision = await almNeuralAgent.shouldRebalance({
+                vault,
+                metadata: variable as Map<string, unknown>,
+              });
+              console.log(`[ALM Neural Agent] Decision: ${decision ? "rebalance" : "skip"}`);
+              return decision;
+            }
             return count % charmRebalancePeriod === 0;
           }
 
           if (rebalance === Rebalance.DLV) {
             if (count % dlvRebalancePeriod === 0) return true;
+            if (isDebtNeuralRebalancing) {
+              const agentTarget = await debtNeuralAgent.recommendTargetCR({
+                vault,
+                metadata: variable as Map<string, unknown>,
+              });
+              console.log("Debt Neural Agent recommended target CR:", agentTarget ? (Number(agentTarget) / 1e16).toFixed(2) + "%" : "no change");
+              if (!agentTarget) return false;
+              setTargetCR(agentTarget);
+            }
             return !(await isWithinCrDeviationThreshold(vault));
           }
 
@@ -175,7 +194,6 @@ const act = async function (
   phase: Phase,
   rebalance: Rebalance,
   engine: Engine,
-  _corePoolView: CorePoolView,
   vault: AlphaProVault,
   variable: Map<string, any>
 ): Promise<void> {
@@ -216,18 +234,18 @@ const act = async function (
       if (
         previousAfterTotalPoolValue !== null &&
         previousTotalAmounts !== null &&
-        previousAccumulatedSwapFees !== null
+        previousTotalSwapFees !== null
       ) {
         const denomNAV = previousAfterTotalPoolValue; // NAV_{t-1} (post-prev-rebalance)
         console.log("[PREV] NAV_{t-1}:", denomNAV.toString());
         console.log("[PREV] amounts.total0:", previousTotalAmounts.total0.toString());
         console.log("[PREV] amounts.total1:", previousTotalAmounts.total1.toString());
-        console.log("[PREV] feesSnapEnd.fees0:", previousAccumulatedSwapFees.fees0.toString());
-        console.log("[PREV] feesSnapEnd.fees1:", previousAccumulatedSwapFees.fees1.toString());
+        console.log("[PREV] feesSnapEnd.fees0:", previousTotalSwapFees.fees0.toString());
+        console.log("[PREV] feesSnapEnd.fees1:", previousTotalSwapFees.fees1.toString());
 
         // fees Δ during (t-1, t] at current price, BEFORE any collection at t
-        const dFees0 = JSBI.subtract(feesSnapStart.fees0, previousAccumulatedSwapFees.fees0);
-        const dFees1 = JSBI.subtract(feesSnapStart.fees1, previousAccumulatedSwapFees.fees1);
+        const dFees0 = JSBI.subtract(feesSnapStart.fees0, previousTotalSwapFees.fees0);
+        const dFees1 = JSBI.subtract(feesSnapStart.fees1, previousTotalSwapFees.fees1);
         const dFees0_InStable = vault.volatileToStableValue(dFees0, currPrice);
         feesDeltaStable = JSBI.add(dFees1, dFees0_InStable);
 
@@ -272,11 +290,12 @@ const act = async function (
       console.log("[REB] willRebalance:", willRebalance);
 
       let swapFeeUSDC = JSBI.BigInt(0);
+      let almSwapFeeUSDC = JSBI.BigInt(0);
       if (rebalance === Rebalance.ALM) {
-        await vault.rebalance(engine);
+        almSwapFeeUSDC = await vault.rebalance(engine);
         variable.set(ALM_CALLS, ((variable.get(ALM_CALLS) as number) ?? 0) + 1);
       } else if (rebalance === Rebalance.DLV) {
-        swapFeeUSDC = await vault.rebalanceDebt(engine);
+        swapFeeUSDC = await vault.rebalanceDebt(engine); // consums internally global variable 'targetCR'
         variable.set(DLV_CALLS, ((variable.get(DLV_CALLS) as number) ?? 0) + 1);
       }
 
@@ -289,6 +308,7 @@ const act = async function (
         : safeToBN(0);
 
       const accumulatedSwapFeesRaw = vault.getAccumulatedSwapFeesRaw();
+      const totalSwapFeesRaw = vault.getTotalSwapFeesRaw();
       const currentTotalValueUSDC = await vault.totalPoolValue(); // NAV_t_end
       const date = variable.get(CommonVariables.DATE) as Date;
 
@@ -315,6 +335,7 @@ const act = async function (
         afterTotalPoolValue: safeToBN(currentTotalValueUSDC),   // NAV_t_end
         lpRatio: safeToBN(await vault.lpRatio(true)),
         swapFeeStable: safeToBN(swapFeeUSDC),
+        almSwapFeeStable: safeToBN(almSwapFeeUSDC),
         prevCollateralRatio,
         afterCollateralRatio,
         accumulatedSwapFees0: safeToBN(accumulatedSwapFeesRaw.fees0),
@@ -338,7 +359,7 @@ const act = async function (
       // ---------- UPDATE SNAPSHOTS FOR NEXT PERIOD ----------
       previousAfterTotalPoolValue = currentTotalValueUSDC; // NAV end-of-period
       previousTotalAmounts = totalAmounts;                 // amounts end-of-period
-      previousAccumulatedSwapFees = accumulatedSwapFeesRaw; // fees snapshot end-of-period
+      previousTotalSwapFees = totalSwapFeesRaw;            // fees snapshot end-of-period
 
       break;
     }
@@ -391,23 +412,23 @@ const act = async function (
     );
 
     try {
-      await strategy.backtest(startDate, endDate, configLookUpPeriod);
-    } catch (error) {
-      console.error("[BACKTEST ERROR]", error);
-      if (process.env.BRUTE_FORCE === 'true') {
-        // For brute-force, still call evaluate with current state
-        console.log("[BRUTE-FORCE] Backtest failed, calling evaluate with partial results");
-        // We need to get the current state somehow, but this is tricky
-        // For now, just print a failed result
-        console.log(`RESULT_JSON: ${JSON.stringify({ vault: 0, hold: 0, diff: 0, error: true })}`);
-        await strategy.shutdown();
-        return;
-      } else {
-        throw error;
+      try {
+        await strategy.backtest(startDate, endDate, configLookUpPeriod);
+      } catch (error) {
+        console.error("[BACKTEST ERROR]", error);
+        if (process.env.BRUTE_FORCE === 'true') {
+          console.log("[BRUTE-FORCE] Backtest failed, calling evaluate with partial results");
+          console.log(`RESULT_JSON: ${JSON.stringify({ vault: 0, hold: 0, diff: 0, error: true })}`);
+          return;
+        } else {
+          throw error;
+        }
       }
+    } finally {
+      await strategy.shutdown();
+      await debtNeuralAgent.shutdown();
+      await almNeuralAgent.shutdown();
     }
-
-    await strategy.shutdown();
   });
 });
 
@@ -422,7 +443,7 @@ async function isWithinCrDeviationThreshold(vault: AlphaProVault): Promise<boole
   if (!Number.isFinite(crPercent)) return true;
 
   // TARGET_CR is WAD (e.g., 2e18); convert to percent (e.g., 200)
-  const TARGET_CR_PERCENT = Number(TARGET_CR) / 1e16;
+  const TARGET_CR_PERCENT = Number(targetCR) / 1e16;
 
   if (crPercent > TARGET_CR_PERCENT) {
     if (thresholdAbove === 0) return true;
