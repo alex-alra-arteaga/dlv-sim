@@ -100,6 +100,8 @@ You can customize the brute-force sweep with the following flags:
 - `--runs <n>`: Caps the total number of parameter combinations executed. Use `0` (default) for all combinations produced by the selected level.
 - `--heapMB <n>`: Sets the Node.js heap size (in megabytes) for each worker. Defaults to `18192`, but you can lower it to fit smaller machines.
 
+- `--captureRebalanceDetails`: Whether to capture detailed per-rebalance data for each simulation. This increases memory usage and output file size, so it's off by default. Stores `token0/1` (amount), `accumulatedSwapFees0/1`, `debt` (amount, before rebalance), `volatileAssetPrice` (in USD and WAD, derived from the pool), and `rebalanceType` (ALM/DLV rebalance) for each rebalance event.
+
 Example for MacBook Pro M3 with 18GB RAM:
 ```bash
 node dist/scripts/brute-force.js --prebuilt --buildDir dist --level light --tickSpacing 60 --runs 0 --mochaSpec dist/test/DLV.test.js --concurrency 9 --heapMB 2048 --listOnce false --reporter min
@@ -200,6 +202,11 @@ head -n 300 brute-force-results_ai_disabled.jsonl > brute-force-results_ai_disab
 # And finally
 python3 scripts/helper/brute-force-comparison/analyze_results.py
 ```
+
+# Context
+
+DLV swaps and Active ALM rebalances doesn't mock fees going through our own pool, slightly understating performance.
+Neither we account for gas costs.
 
 # Future features
 

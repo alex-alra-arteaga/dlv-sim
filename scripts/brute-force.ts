@@ -7,8 +7,10 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import sqlite3 from "sqlite3";
 
-import { configLookUpPeriod } from "../config";
+import { configLookUpPeriod, activeRebalanceMode, ActiveRebalanceMode } from "../config";
+import { getCurrentPoolConfig } from "../src/pool-config";
 
 type Level = "air" | "light" | "standard" | "heavy" | "extreme";
 type Range<T> = T[];
@@ -36,6 +38,15 @@ for (let i = 0; i < argv.length; i++) {
   }
 }
 
+function parseBooleanFlag(raw: unknown): boolean {
+  if (raw === undefined) return false;
+  if (typeof raw === "boolean") return raw;
+  const normalized = String(raw).trim().toLowerCase();
+  if (normalized === "") return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return true;
+}
+
 const LEVEL: Level = (args.level ?? "standard") as Level;
 const TICK_SPACING = Number(args.tickSpacing ?? 60);
 const POOL_FEE_TIER = Number(args.feeTierBps ?? 30); // just metadata for report
@@ -43,6 +54,15 @@ const RUNS_CAP = Number(args.runs ?? 0); // 0 = no cap
 const HEAP_MB = Number(args.heapMB ?? 18192);
 const PROJECT_ROOT = process.cwd();
 const RESULTS_PATH = path.join(PROJECT_ROOT, "brute-force-results.jsonl");
+const IS_ACTIVE_REBALANCE = activeRebalanceMode === ActiveRebalanceMode.ACTIVE;
+const CAPTURE_REBALANCE_DETAILS = parseBooleanFlag(args.captureRebalanceDetails);
+const fsp = fs.promises;
+const poolConfig = getCurrentPoolConfig();
+const REBALANCE_DB_REL_PATH = poolConfig.getRebalanceLogDbPath();
+const REBALANCE_LOG_DB_PATH = path.isAbsolute(REBALANCE_DB_REL_PATH)
+  ? REBALANCE_DB_REL_PATH
+  : path.join(PROJECT_ROOT, REBALANCE_DB_REL_PATH);
+const SNAPSHOT_DIR = path.join(os.tmpdir(), "dlv-sim-rebalance-logs");
 
 // ---- helpers ----
 function alignTick(n: number, spacing: number) {
@@ -91,6 +111,29 @@ function seededInts(n: number, lo: number, hi: number, spacing=1) {
 }
 // No longer needed; we won't patch files for concurrency
 
+const RANGE_THINNING_FACTOR = 0.5;
+const WEIGHT_THINNING_FACTOR = 0.5;
+const uniq = <T>(values: T[]) => Array.from(new Set(values));
+const thinTickValue = (value: number) =>
+  alignTick(Math.max(TICK_SPACING, value * RANGE_THINNING_FACTOR), TICK_SPACING);
+const thinTickSet = (values: number[]) => uniq(values.map(thinTickValue));
+const alignTickSet = (values: number[]) => values.map((value) => alignTick(value, TICK_SPACING));
+const maybeThinTicks = (values: number[]) => IS_ACTIVE_REBALANCE ? thinTickSet(values) : alignTickSet(values);
+const thinWeightSet = (percentages: number[]) =>
+  uniq(percentages.map((pct) => pctToWeight(Math.max(0, pct * WEIGHT_THINNING_FACTOR))));
+const maybeThinWeights = (percentages: number[]) =>
+  IS_ACTIVE_REBALANCE
+    ? thinWeightSet(percentages)
+    : percentages.map((pct) => pctToWeight(pct));
+const scaledSeedBounds = (lo: number, hi: number): [number, number] => {
+  const scaledLo = thinTickValue(lo);
+  const scaledHi = thinTickValue(hi);
+  const hiAdjusted = Math.max(scaledLo + TICK_SPACING, scaledHi);
+  return [scaledLo, hiAdjusted];
+};
+const maybeThinSeedBounds = (lo: number, hi: number): [number, number] =>
+  IS_ACTIVE_REBALANCE ? scaledSeedBounds(lo, hi) : [lo, hi];
+
 // ---- parameter grids per level ----
 // constraints (reasonable defaults):
 // wideThreshold >= 2 * baseThreshold
@@ -109,6 +152,130 @@ type DLV = {
   deviationThresholdBelow?: number;
   debtToVolatileSwapFee: number;
 };
+type CharmOutput = Omit<Charm, "period"> & Partial<Pick<Charm, "period">>;
+type DLVOutput = DLV | undefined;
+type RawRebalanceRow = {
+  id?: number;
+  wide0?: string; wide1?: string;
+  base0?: string; base1?: string;
+  limit0?: string; limit1?: string;
+  total0?: string; total1?: string;
+  nonVolatileAssetPrice?: string;
+  prevTotalPoolValue?: string;
+  afterTotalPoolValue?: string;
+  lpRatio?: string;
+  swapFeeStable?: string;
+  almSwapFeeStable?: string;
+  prevCollateralRatio?: string;
+  afterCollateralRatio?: string;
+  accumulatedSwapFees0?: string;
+  accumulatedSwapFees1?: string;
+  volatileHoldValueStable?: string;
+  realizedIL?: string;
+  swapFeesGainedThisPeriod?: string;
+  date?: string;
+  debt?: string;
+  rebalanceType?: string;
+};
+type RebalanceStep = {
+  token0: string;
+  token1: string;
+  accumulatedSwapFees0: string;
+  accumulatedSwapFees1: string;
+  rebalanceType?: string;
+  volatileAssetPrice: string;
+  debt: string;
+};
+
+const formatCharmForOutput = (cfg: Charm): CharmOutput => {
+  if (!IS_ACTIVE_REBALANCE) return cfg;
+  const { period, ...rest } = cfg;
+  return rest;
+};
+
+const formatDLVForOutput = (cfg: DLV): DLVOutput => {
+  if (IS_ACTIVE_REBALANCE) return undefined;
+  return cfg;
+};
+
+const strOrZero = (value: unknown, fallback = "0") =>
+  value === undefined || value === null ? fallback : String(value);
+const optionalString = (value: unknown) =>
+  value === undefined || value === null ? undefined : String(value);
+let snapshotDirReady = false;
+
+async function ensureSnapshotDir(): Promise<void> {
+  if (snapshotDirReady) return;
+  await fsp.mkdir(SNAPSHOT_DIR, { recursive: true });
+  snapshotDirReady = true;
+}
+
+async function snapshotRebalanceDb(runKey: string): Promise<string | undefined> {
+  try {
+    await ensureSnapshotDir();
+    const snapshotPath = path.join(SNAPSHOT_DIR, `${runKey}-${Date.now()}.db`);
+    await fsp.copyFile(REBALANCE_LOG_DB_PATH, snapshotPath);
+    return snapshotPath;
+  } catch (err) {
+    console.error(`[BRUTE-FORCE WARNING] Failed to snapshot rebalance DB for run ${runKey}:`, err);
+    return undefined;
+  }
+}
+
+function mapRowToStep(row: RawRebalanceRow, _: number): RebalanceStep {
+  return {
+    token0: strOrZero(row.total0),
+    token1: strOrZero(row.total1),
+    accumulatedSwapFees0: strOrZero(row.accumulatedSwapFees0),
+    accumulatedSwapFees1: strOrZero(row.accumulatedSwapFees1),
+    rebalanceType: optionalString(row.rebalanceType),
+    volatileAssetPrice: strOrZero(row.nonVolatileAssetPrice),
+    debt: strOrZero(row.debt),
+  };
+}
+
+function fetchRebalanceStepsFromDb(dbPath: string): Promise<RebalanceStep[]> {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      db.all("SELECT * FROM rebalanceLog ORDER BY id ASC", (allErr, rows: RawRebalanceRow[]) => {
+        if (allErr) {
+          db.close(() => reject(allErr));
+          return;
+        }
+        const steps = rows.map((row, idx) => mapRowToStep(row, idx));
+        db.close((closeErr) => {
+          if (closeErr) {
+            reject(closeErr);
+            return;
+          }
+          resolve(steps);
+        });
+      });
+    });
+  });
+}
+
+async function safeUnlink(filePath: string): Promise<void> {
+  try {
+    await fsp.unlink(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn(`[BRUTE-FORCE WARNING] Failed to clean up snapshot ${filePath}:`, err);
+    }
+  }
+}
+
+async function readStepsFromSnapshot(snapshotPath: string): Promise<RebalanceStep[]> {
+  try {
+    return await fetchRebalanceStepsFromDb(snapshotPath);
+  } finally {
+    await safeUnlink(snapshotPath);
+  }
+}
 
 function grids(level: Level) {
   const PERIODS = {
@@ -117,8 +284,8 @@ function grids(level: Level) {
     wide: [align4h(12*3600), align4h(24*3600), align4h(48*3600), align4h(72*3600), align4h(96*3600)]
   };
 
-  const weights_sm = [pctToWeight(0.05), pctToWeight(0.10), pctToWeight(0.15)];
-  const weights_md = [pctToWeight(0.05), pctToWeight(0.10), pctToWeight(0.15), pctToWeight(0.20), pctToWeight(0.25)];
+  const weights_sm = maybeThinWeights([0.05, 0.10, 0.15]);
+  const weights_md = maybeThinWeights([0.05, 0.10, 0.15, 0.20, 0.25]);
 
   // base ranges (pre-constraint)
   let wideTh: number[] = [];
@@ -131,19 +298,19 @@ function grids(level: Level) {
 
   switch (level) {
     case "air": {
-      wideTh = [alignTick(8000, TICK_SPACING), alignTick(12000, TICK_SPACING)];
-      baseTh = [alignTick(3600, TICK_SPACING), alignTick(4800, TICK_SPACING)];
-      limitTh = [alignTick(900, TICK_SPACING), alignTick(1200, TICK_SPACING)];
+      wideTh = maybeThinTicks([8000, 12000]);
+      baseTh = maybeThinTicks([3600, 4800]);
+      limitTh = maybeThinTicks([900, 1200]);
       cPeriods = PERIODS.tight;
-      weights = [pctToWeight(0.10)];
+      weights = maybeThinWeights([0.10]);
   // dlvPeriods = [undefined, align4h(7*24*3600)]; // commented out
       devs = [0.10];
       break;
     }
     case "light": {
-      wideTh = [8000, 10000, 12000].map(v=>alignTick(v,TICK_SPACING));
-      baseTh = [3000, 4200, 4800].map(v=>alignTick(v,TICK_SPACING));
-      limitTh = [600, 900, 1200].map(v=>alignTick(v,TICK_SPACING));
+      wideTh = maybeThinTicks([8000, 10000, 12000]);
+      baseTh = maybeThinTicks([3000, 4200, 4800]);
+      limitTh = maybeThinTicks([600, 900, 1200]);
       cPeriods = PERIODS.medium;
       weights = weights_sm;
   // dlvPeriods = [undefined, align4h(7*24*3600), align4h(30*24*3600)]; // commented out
@@ -151,9 +318,9 @@ function grids(level: Level) {
       break;
     }
     case "standard": {
-      wideTh = [8000, 10000, 12000, 14000].map(v=>alignTick(v,TICK_SPACING));
-      baseTh = [2400, 3600, 4800, 5400].map(v=>alignTick(v,TICK_SPACING));
-      limitTh = [600, 900, 1200, 1800].map(v=>alignTick(v,TICK_SPACING));
+      wideTh = maybeThinTicks([8000, 10000, 12000, 14000]);
+      baseTh = maybeThinTicks([2400, 3600, 4800, 5400]);
+      limitTh = maybeThinTicks([600, 900, 1200, 1800]);
       cPeriods = PERIODS.wide;
       weights = weights_md;
   // dlvPeriods = [undefined, align4h(7*24*3600), align4h(30*24*3600), align4h(90*24*3600)]; // commented out
@@ -161,26 +328,34 @@ function grids(level: Level) {
       break;
     }
     case "heavy": {
-      wideTh = [6000, 8000, 10000, 12000, 14000, 16000].map(v=>alignTick(v,TICK_SPACING));
-      baseTh = [2400, 3000, 3600, 4200, 4800, 6000].map(v=>alignTick(v,TICK_SPACING));
-      limitTh = [600, 900, 1200, 1500, 1800, 2100].map(v=>alignTick(v,TICK_SPACING));
+      wideTh = maybeThinTicks([6000, 8000, 10000, 12000, 14000, 16000]);
+      baseTh = maybeThinTicks([2400, 3000, 3600, 4200, 4800, 6000]);
+      limitTh = maybeThinTicks([600, 900, 1200, 1500, 1800, 2100]);
       cPeriods = [12,24,36,48,72,96].map(h=>align4h(h*3600));
-      weights = [0.05,0.075,0.10,0.125,0.15,0.20,0.25].map(pctToWeight);
+      weights = maybeThinWeights([0.05,0.075,0.10,0.125,0.15,0.20,0.25]);
   // dlvPeriods = [undefined, ...[12,24,36,48,72].map(h=>align4h(h*3600))]; // commented out
       devs = [0.03,0.05,0.075,0.10,0.125,0.15,0.20,0.25];
       break;
     }
     case "extreme": {
       // large quasi-random coverage; sizes are upper-bounded later by RUNS_CAP
-      wideTh  = seededInts(20, 6000, 20000, TICK_SPACING);
-      baseTh  = seededInts(20, 2000,  8000, TICK_SPACING);
-      limitTh = seededInts(20,  400,  3000, TICK_SPACING);
+      const [wideLo, wideHi] = maybeThinSeedBounds(6000, 20000);
+      const [baseLo, baseHi] = maybeThinSeedBounds(2000, 8000);
+      const [limitLo, limitHi] = maybeThinSeedBounds(400, 3000);
+      wideTh  = seededInts(20, wideLo, wideHi, TICK_SPACING);
+      baseTh  = seededInts(20, baseLo, baseHi, TICK_SPACING);
+      limitTh = seededInts(20, limitLo, limitHi, TICK_SPACING);
       cPeriods = Array.from(new Set([12,16,20,24,28,32,36,40,48,60,72,84,96].map(h=>align4h(h*3600))));
-      weights = Array.from({length: 15}, (_,i)=>pctToWeight(0.04 + i*0.014)); // ~4%..24.6%
+      const extremeWeightPcts = Array.from({length: 15}, (_,i)=>0.04 + i*0.014);
+      weights = maybeThinWeights(extremeWeightPcts);
   // dlvPeriods = [undefined, ...[12,16,20,24,28,32,36,40,48,60,72].map(h=>align4h(h*3600))]; // commented out
       devs = Array.from({length: 12}, (_,i)=>0.03 + i*0.02); // 3%..25%
       break;
     }
+  }
+
+  if (IS_ACTIVE_REBALANCE) {
+    devs = [0.01];
   }
 
   // build charm configs honoring constraints
@@ -208,13 +383,15 @@ function grids(level: Level) {
   //   });
   // }
   // Use a fixed undefined period while dlvPeriods logic is commented out
-  for (const [p, a, b] of cartesian([undefined], devs, devs)) {
-    dlv.push({
-      period: p,
+  const dlvPeriodOptions: Array<number | undefined> = [undefined];
+  for (const [p, a, b] of cartesian(dlvPeriodOptions, devs, devs)) {
+    const next: DLV = {
       deviationThresholdAbove: a,
       deviationThresholdBelow: b,
       debtToVolatileSwapFee: 0.0015,
-    });
+    };
+    if (p !== undefined) next.period = p;
+    dlv.push(next);
   }
 
   return { charm, dlv };
@@ -222,8 +399,11 @@ function grids(level: Level) {
 
 // ---- runner ----
 function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolean; apy?: any; stdout?: string; stderr?: string }> {
-  console.log(`[BRUTE-FORCE] [W${workerId}] Starting run with charm config:`, JSON.stringify(charm));
-  console.log(`[BRUTE-FORCE] [W${workerId}] DLV config:`, JSON.stringify(dlv));
+  console.log(`[BRUTE-FORCE] [W${workerId}] Starting run with charm config:`, JSON.stringify(formatCharmForOutput(charm)));
+  const dlvLog = formatDLVForOutput(dlv);
+  if (dlvLog !== undefined) {
+    console.log(`[BRUTE-FORCE] [W${workerId}] DLV config:`, JSON.stringify(dlvLog));
+  }
 
   const mochaCmd = [
     "node",
@@ -343,6 +523,27 @@ function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolea
   // header for results
   fs.writeFileSync(RESULTS_PATH, "", "utf8");
 
+  const rowWritePromises: Promise<void>[] = [];
+  function queueRowWrite(row: Record<string, any>, runKey: string, snapshotPath?: string) {
+    const detailPromise: Promise<RebalanceStep[] | undefined> = CAPTURE_REBALANCE_DETAILS
+      ? (snapshotPath
+          ? readStepsFromSnapshot(snapshotPath).catch((err) => {
+              console.error(`[BRUTE-FORCE WARNING] Failed to read rebalance log for run ${runKey}:`, err);
+              return [];
+            })
+          : Promise.resolve([]))
+      : Promise.resolve(undefined);
+
+    const writePromise = detailPromise.then((steps) => {
+      const outputRow = CAPTURE_REBALANCE_DETAILS
+        ? { ...row, rebalanceSteps: steps ?? [] }
+        : row;
+      fs.appendFileSync(RESULTS_PATH, JSON.stringify(outputRow) + "\n", "utf8");
+    });
+
+    rowWritePromises.push(writePromise);
+  }
+
   let runCount = 0;
   let successCount = 0;
   let totalVaultAPY = 0;
@@ -369,7 +570,8 @@ function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolea
 
       const row = {
         key, level: LEVEL, tickSpacing: TICK_SPACING, poolFeeBps: POOL_FEE_TIER,
-        charm: c, dlv: d,
+        charm: formatCharmForOutput(c),
+        dlv: formatDLVForOutput(d),
         ok: res.ok,
         apy: res.ok ? res.apy : null,
         err: res.ok ? null : { stdout: res.stdout, stderr: res.stderr },
@@ -386,13 +588,19 @@ function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolea
         console.log(`[BRUTE-FORCE FAILED] [W${wid}] Run: ${key} (${ms}ms)`);
       }
 
-      fs.appendFileSync(RESULTS_PATH, JSON.stringify(row) + "\n", "utf8");
+      let snapshotPath: string | undefined;
+      if (CAPTURE_REBALANCE_DETAILS) {
+        snapshotPath = await snapshotRebalanceDb(key);
+      }
+
+      queueRowWrite(row, key, snapshotPath);
       runCount++;
     }
   }
 
   const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
   await Promise.all(workers);
+  await Promise.all(rowWritePromises);
 
   // Summary statistics
   const avgVaultAPY = successCount > 0 ? totalVaultAPY / successCount : 0;

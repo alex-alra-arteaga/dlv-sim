@@ -34,6 +34,8 @@ export interface RebalanceLog {
   afterCollateralRatio: BN;
   accumulatedSwapFees0: BN;
   accumulatedSwapFees1: BN;
+  debt: BN;
+  rebalanceType: "ALM" | "DLV";
   // IL tracking fields
   volatileHoldValueStable: BN; // Value of individual holdings at next period's price
   realizedIL: BN; // IL as percentage (scaled by 10000 for precision)
@@ -114,7 +116,7 @@ describe("DLV Strategy", function () {
     let dlvRebalancePeriod = dlvConfig.period ? dlvConfig.period / configLookUpPeriod : Number(MaxUint128);
 
     let startDate = getDate(2021, 5, 6);
-    let endDate = getDate(2024, 10, 29);
+    let endDate = getDate(2024, 12, 15);
 
     // // For brute-force testing, use shorter period to speed up execution
     // if (process.env.BRUTE_FORCE === 'true') {
@@ -185,7 +187,6 @@ const HALF_BPS = JSBI.BigInt(5_000);
 const ZERO = JSBI.BigInt(0);
 const ONE = JSBI.BigInt(1);
 const TWO = JSBI.BigInt(2);
-const maxFinalDeviationBps = JSBI.BigInt(1); // 0.01%
 const parsedActiveRebalanceBps = Number(activeRebalanceRatioDeviationBps ?? 0);
 const activeRebalanceThresholdNumeric = Number.isFinite(parsedActiveRebalanceBps)
   ? Math.max(0, Math.floor(parsedActiveRebalanceBps))
@@ -360,8 +361,11 @@ const act = async function (
         : safeToBN(0);
 
       const feesSnapStart = vault.getTotalSwapFeesRaw(); // Use total fees (collected + uncollected)
+      const accumulatedSwapFeesRaw = vault.getAccumulatedSwapFeesRaw();
       console.log("[START] feesSnapStart.fees0 (volatile):", feesSnapStart.fees0.toString());
       console.log("[START] feesSnapStart.fees1 (stable):", feesSnapStart.fees1.toString());
+      console.log("[START] accumulatedSwapFeesRaw.fees0 (volatile):", accumulatedSwapFeesRaw.fees0.toString());
+      console.log("[START] accumulatedSwapFeesRaw.fees1 (stable):", accumulatedSwapFeesRaw.fees1.toString());
 
       // ---------- IL compute (t-1 → t), NAV-consistent ----------
       let realizedIL_bps_inclFees = ZERO;
@@ -462,7 +466,6 @@ const act = async function (
         ? safeToBN(Math.round(afterCollateralRatioNum * 100))
         : safeToBN(0);
 
-      const accumulatedSwapFeesRaw = vault.getAccumulatedSwapFeesRaw();
       const totalSwapFeesRaw = vault.getTotalSwapFeesRaw();
       const currentTotalValueUSDC = await vault.totalPoolValue(); // NAV_t_end
       const date = variable.get(CommonVariables.DATE) as Date;
@@ -495,6 +498,8 @@ const act = async function (
         afterCollateralRatio,
         accumulatedSwapFees0: safeToBN(accumulatedSwapFeesRaw.fees0),
         accumulatedSwapFees1: safeToBN(accumulatedSwapFeesRaw.fees1),
+        debt: safeToBN(debtNow),
+        rebalanceType: rebalance === Rebalance.DLV ? "DLV" : "ALM",
         volatileHoldValueStable: safeToBN(hodlNowStable),
         // realizedIL = bps EX-FEES (NAV-based)
         realizedIL: safeToBN(realizedIL_bps_exFees),

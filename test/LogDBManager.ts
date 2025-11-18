@@ -60,6 +60,8 @@ export class LogDBManager {
             t.string("afterCollateralRatio", 255);
             t.string("accumulatedSwapFees0", 255);
             t.string("accumulatedSwapFees1", 255);
+            t.string("debt", 255);
+            t.string("rebalanceType", 32);
             t.string("almSwapFeeStable", 255);
             t.string("volatileHoldValueStable", 255);
             t.string("realizedIL", 255);
@@ -88,6 +90,8 @@ export class LogDBManager {
         { name: "afterCollateralRatio", type: "string" },
         { name: "accumulatedSwapFees0", type: "string" },
         { name: "accumulatedSwapFees1", type: "string" },
+        { name: "debt", type: "string" },
+        { name: "rebalanceType", type: "string" },
         { name: "almSwapFeeStable", type: "string" },
         { name: "volatileHoldValueStable", type: "string" },
         { name: "realizedIL", type: "string" },
@@ -132,6 +136,8 @@ export class LogDBManager {
           rebalanceLog.afterCollateralRatio,
           rebalanceLog.accumulatedSwapFees0,
           rebalanceLog.accumulatedSwapFees1,
+          rebalanceLog.debt,
+          rebalanceLog.rebalanceType,
           rebalanceLog.volatileHoldValueStable,
           rebalanceLog.realizedIL,
           rebalanceLog.swapFeesGainedThisPeriod,
@@ -169,6 +175,8 @@ export class LogDBManager {
     afterCollateralRatio: BN,
     accumulatedSwapFees0: BN,
     accumulatedSwapFees1: BN,
+    debt: BN,
+    rebalanceType: string,
     volatileHoldValueStable: BN,
     realizedIL: BN,
     swapFeesGainedThisPeriod: BN,
@@ -195,6 +203,8 @@ export class LogDBManager {
         afterCollateralRatio: afterCollateralRatio.toString(),
         accumulatedSwapFees0: accumulatedSwapFees0.toString(),
         accumulatedSwapFees1: accumulatedSwapFees1.toString(),
+        debt: debt.toString(),
+        rebalanceType,
         volatileHoldValueStable: volatileHoldValueStable.toString(),
         realizedIL: realizedIL.toString(),
         swapFeesGainedThisPeriod: swapFeesGainedThisPeriod.toString(),
