@@ -90,11 +90,10 @@ export async function buildStrategy(
       start: Date,
       end: Date
     ): AsyncGenerator<PoolEvent, void, unknown> {
-      const [mints, burns, swaps] = await Promise.all([
-        eventDB.getLiquidityEventsByDate(EventType.MINT, fmtUTC(start), fmtUTC(end)),
-        eventDB.getLiquidityEventsByDate(EventType.BURN, fmtUTC(start), fmtUTC(end)),
-        eventDB.getSwapEventsByDate(                     fmtUTC(start), fmtUTC(end)),
-      ]);
+      // Fetch sequentially so concurrent brute-force runs do not starve the SQLite pool.
+      const mints = await eventDB.getLiquidityEventsByDate(EventType.MINT, fmtUTC(start), fmtUTC(end));
+      const burns = await eventDB.getLiquidityEventsByDate(EventType.BURN, fmtUTC(start), fmtUTC(end));
+      const swaps = await eventDB.getSwapEventsByDate(                     fmtUTC(start), fmtUTC(end));
     
       let i = 0, j = 0, k = 0;
       while (true) {

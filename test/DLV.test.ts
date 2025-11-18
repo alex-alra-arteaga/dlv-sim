@@ -3,14 +3,14 @@ import {
   EventDBManager,
   getDate
 } from "@bella-defintech/uniswap-v3-simulator";
-import { safeToBN } from "../src/utils";
+import { safeToBN, FEE_DEN, mulDiv } from "../src/utils";
 import { BigNumber as BN } from "ethers";
 import { buildStrategy, CommonVariables, Phase, Rebalance } from "../src/strategy";
 import { Engine } from "../src/engine";
 import { MaxUint128 } from "../src/internal_constants";
 import { LogDBManager } from "./LogDBManager";
-import { charmConfig, dlvConfig, configLookUpPeriod, isDebtNeuralRebalancing, isALMNeuralRebalancing, targetCR, setTargetCR, debtAgentConfig, almAgentConfig } from "../config";
-import { AlphaProVault } from "../src/charm/alpha-pro-vault";
+import { charmConfig, dlvConfig, configLookUpPeriod, isDebtNeuralRebalancing, isALMNeuralRebalancing, targetCR, setTargetCR, debtAgentConfig, almAgentConfig, activeRebalanceRatioDeviationBps, debtToVolatileSwapFee, activeRebalanceMode, ActiveRebalanceMode } from "../config";
+import { AlphaProVault, ExternalRebalanceParams } from "../src/charm/alpha-pro-vault";
 import { getCurrentPoolConfig, PoolConfigManager } from "../src/pool-config";
 import { DebtNeuralAgent } from "../src/neural-agent/debt-neural-agent";
 import { ALMNeuralAgent } from "../src/neural-agent/alm-neural-agent";
@@ -114,7 +114,7 @@ describe("DLV Strategy", function () {
     let dlvRebalancePeriod = dlvConfig.period ? dlvConfig.period / configLookUpPeriod : Number(MaxUint128);
 
     let startDate = getDate(2021, 5, 6);
-    let endDate = getDate(2024, 12, 15);
+    let endDate = getDate(2024, 10, 29);
 
     // // For brute-force testing, use shorter period to speed up execution
     // if (process.env.BRUTE_FORCE === 'true') {
@@ -179,15 +179,154 @@ describe("DLV Strategy", function () {
     };
 
 
-// --- helpers (unchanged) ---
+// --- helper constants and active rebalance plumbing ---
 const BPS_SCALE = JSBI.BigInt(10_000);
+const HALF_BPS = JSBI.BigInt(5_000);
 const ZERO = JSBI.BigInt(0);
+const ONE = JSBI.BigInt(1);
+const TWO = JSBI.BigInt(2);
+const maxFinalDeviationBps = JSBI.BigInt(1); // 0.01%
+const parsedActiveRebalanceBps = Number(activeRebalanceRatioDeviationBps ?? 0);
+const activeRebalanceThresholdNumeric = Number.isFinite(parsedActiveRebalanceBps)
+  ? Math.max(0, Math.floor(parsedActiveRebalanceBps))
+  : 0;
+const ACTIVE_REBALANCE_THRESHOLD_BPS = JSBI.BigInt(activeRebalanceThresholdNumeric);
+const feeDenNumeric = Number(FEE_DEN.toString());
+const parsedSwapFee = Number(debtToVolatileSwapFee ?? 0);
+const swapFeeClamped = Math.min(Math.max(Number.isFinite(parsedSwapFee) ? parsedSwapFee : 0, 0), 1);
+const SWAP_FEE_NUM = JSBI.BigInt(Math.floor(swapFeeClamped * feeDenNumeric));
+const ONE_MINUS_SWAP_FEE = JSBI.greaterThan(SWAP_FEE_NUM, ZERO)
+  ? JSBI.subtract(FEE_DEN, SWAP_FEE_NUM)
+  : FEE_DEN;
+const ACTIVE_REBALANCE_VALUE_DIVISOR = JSBI.subtract(JSBI.multiply(FEE_DEN, TWO), SWAP_FEE_NUM);
 const isPos = (x: JSBI) => JSBI.greaterThan(x, ZERO);
 // round-half-up
 function divRound(n: JSBI, d: JSBI): JSBI {
   if (!isPos(d)) return ZERO;
   const half = JSBI.divide(d, JSBI.BigInt(2));
   return JSBI.divide(JSBI.add(n, half), d);
+}
+
+function shareDeviationBpsFromValues(stableValue: JSBI, volatileValueInStable: JSBI): JSBI {
+  const totalValue = JSBI.add(stableValue, volatileValueInStable);
+  if (!isPos(totalValue)) return ZERO;
+  const scaledStable = JSBI.multiply(stableValue, BPS_SCALE);
+  const stableShareBps = divRound(scaledStable, totalValue);
+  return JSBI.greaterThan(stableShareBps, HALF_BPS)
+    ? JSBI.subtract(stableShareBps, HALF_BPS)
+    : JSBI.subtract(HALF_BPS, stableShareBps);
+}
+
+function computeStableValueToSwap(diff: JSBI): JSBI {
+  if (!isPos(diff)) return ZERO;
+  if (!isPos(ACTIVE_REBALANCE_VALUE_DIVISOR)) return ZERO;
+  const numerator = JSBI.multiply(diff, FEE_DEN);
+  const value = divRound(numerator, ACTIVE_REBALANCE_VALUE_DIVISOR);
+  return JSBI.greaterThan(value, ZERO) ? value : ONE;
+}
+
+function evaluateZeroForOneCandidate(
+  vault: AlphaProVault,
+  priceWad: JSBI,
+  totals: { total0: JSBI; total1: JSBI },
+  amount: JSBI
+): { diff: JSBI; ratioTol: JSBI; comparison: number } | null {
+  if (!isPos(amount) || JSBI.greaterThan(amount, totals.total0)) return null;
+  const remainingVolatile = JSBI.subtract(totals.total0, amount);
+  const stableGainRaw = vault.volatileToStableValue(amount, priceWad);
+  const stableGain = mulDiv(stableGainRaw, ONE_MINUS_SWAP_FEE, FEE_DEN);
+  const stableAfter = JSBI.add(totals.total1, stableGain);
+  const volatileValueAfter = vault.volatileToStableValue(remainingVolatile, priceWad);
+  const volatileGreater = JSBI.greaterThan(volatileValueAfter, stableAfter);
+  const stableGreater = JSBI.greaterThan(stableAfter, volatileValueAfter);
+  const diff = volatileGreater
+    ? JSBI.subtract(volatileValueAfter, stableAfter)
+    : JSBI.subtract(stableAfter, volatileValueAfter);
+  const reference = volatileGreater ? volatileValueAfter : stableAfter;
+  const ratioTol = JSBI.equal(reference, ZERO) ? ZERO : JSBI.divide(reference, BPS_SCALE);
+  const comparison = volatileGreater ? 1 : stableGreater ? -1 : 0;
+  return { diff, ratioTol, comparison };
+}
+
+function findZeroForOneSwapAmount(
+  vault: AlphaProVault,
+  priceWad: JSBI,
+  totals: { total0: JSBI; total1: JSBI }
+): JSBI | null {
+  if (!isPos(totals.total0)) return null;
+  let lo = ONE;
+  let hi = totals.total0;
+  let candidate: JSBI | null = null;
+
+  while (JSBI.lessThanOrEqual(lo, hi)) {
+    const mid = divRound(JSBI.add(lo, hi), TWO);
+    if (!isPos(mid)) break;
+
+    const evaluation = evaluateZeroForOneCandidate(vault, priceWad, totals, mid);
+    if (!evaluation) break;
+
+    const { diff, ratioTol, comparison } = evaluation;
+    if (JSBI.lessThanOrEqual(diff, ratioTol)) {
+      candidate = mid;
+      if (JSBI.equal(mid, ONE)) break;
+      hi = JSBI.subtract(mid, ONE);
+    } else if (comparison > 0) {
+      lo = JSBI.add(mid, ONE);
+    } else if (comparison < 0) {
+      if (JSBI.equal(mid, ONE)) break;
+      hi = JSBI.subtract(mid, ONE);
+    } else {
+      if (JSBI.equal(mid, ONE)) break;
+      hi = JSBI.subtract(mid, ONE);
+    }
+  }
+
+  if (!candidate) return null;
+  const finalEval = evaluateZeroForOneCandidate(vault, priceWad, totals, candidate);
+  if (!finalEval) return null;
+  return JSBI.lessThanOrEqual(finalEval.diff, finalEval.ratioTol) ? candidate : null;
+}
+
+async function maybeExecuteActiveRebalance(
+  vault: AlphaProVault,
+  engine: Engine,
+  totals: { total0: JSBI; total1: JSBI },
+  priceWad: JSBI
+): Promise<JSBI | null> {
+  if (!isPos(ACTIVE_REBALANCE_THRESHOLD_BPS)) return null;
+
+  const stableValue = totals.total1;
+  const volatileValueInStable = vault.volatileToStableValue(totals.total0, priceWad);
+  const deviationBps = shareDeviationBpsFromValues(stableValue, volatileValueInStable);
+  if (JSBI.lessThan(deviationBps, ACTIVE_REBALANCE_THRESHOLD_BPS)) return null;
+
+  const isStableHeavy = JSBI.greaterThan(stableValue, volatileValueInStable);
+  const diff = isStableHeavy
+    ? JSBI.subtract(stableValue, volatileValueInStable)
+    : JSBI.subtract(volatileValueInStable, stableValue);
+
+  const stableValueToSwap = computeStableValueToSwap(diff);
+  if (!isPos(stableValueToSwap)) return null;
+
+  let params: ExternalRebalanceParams;
+  if (isStableHeavy) {
+    params = {
+      isZeroForOne: false,
+      sentAmount: stableValueToSwap,
+      minRebalanceOut: ZERO,
+    };
+  } else {
+    const sentVolatile = findZeroForOneSwapAmount(vault, priceWad, totals);
+    if (sentVolatile === null || !isPos(sentVolatile)) return null;
+    params = {
+      isZeroForOne: true,
+      sentAmount: sentVolatile,
+      minRebalanceOut: ZERO,
+    };
+  }
+
+  console.log("[ACTIVE REBALANCE] triggering with deviation (bps):", deviationBps.toString());
+  return vault.activeRebalance(engine, params);
 }
 
 const act = async function (
@@ -292,7 +431,23 @@ const act = async function (
       let swapFeeUSDC = JSBI.BigInt(0);
       let almSwapFeeUSDC = JSBI.BigInt(0);
       if (rebalance === Rebalance.ALM) {
-        almSwapFeeUSDC = await vault.rebalance(engine);
+        const allowActive = activeRebalanceMode !== ActiveRebalanceMode.PASSIVE;
+        const totalsForActive = allowActive ? await vault.getTotalAmounts(true) : null;
+        const activeRebalanceFee = allowActive && totalsForActive
+          ? await maybeExecuteActiveRebalance(vault, engine, totalsForActive, currPrice)
+          : null;
+        const didActiveRebalance = activeRebalanceFee !== null;
+
+        if (didActiveRebalance) {
+          almSwapFeeUSDC = activeRebalanceFee!;
+        }
+
+        const shouldRunPassive =
+          !didActiveRebalance && activeRebalanceMode !== ActiveRebalanceMode.ACTIVE;
+        if (shouldRunPassive) {
+          almSwapFeeUSDC = await vault.rebalance(engine);
+        }
+
         variable.set(ALM_CALLS, ((variable.get(ALM_CALLS) as number) ?? 0) + 1);
       } else if (rebalance === Rebalance.DLV) {
         swapFeeUSDC = await vault.rebalanceDebt(engine); // consums internally global variable 'targetCR'

@@ -8,7 +8,7 @@ setCurrentPoolConfig(WBTC_USDC_CONFIG);
 
 export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
 export const isDebtNeuralRebalancing = false; // Whether to enable debt neutral rebalancing
-export const isALMNeuralRebalancing = true; // Whether to override ALM period rebalancing with the neural agent
+export const isALMNeuralRebalancing = false; // Whether to override ALM period rebalancing with the neural agent
 export let targetCR = JSBI.BigInt(2e18); // 200% in WAD
 
 export function setTargetCR(value: JSBI) {
@@ -112,6 +112,40 @@ export const dlvConfig: DLVConfig = (() => {
 })();
 
 export const debtToVolatileSwapFee = dlvConfig.debtToVolatileSwapFee;
+
+export enum ActiveRebalanceMode {
+  ACTIVE = "Active",
+  PASSIVE = "Passive",
+  HYBRID = "Hybrid",
+}
+
+// Set the desired mode here; env override is optional for automation.
+const configuredActiveRebalanceMode: ActiveRebalanceMode = ActiveRebalanceMode.ACTIVE;
+
+function parseActiveRebalanceMode(defaultMode: ActiveRebalanceMode): ActiveRebalanceMode {
+  const raw = process.env.ACTIVE_REBALANCE_MODE?.toLowerCase();
+  switch (raw) {
+    case "active":
+      return ActiveRebalanceMode.ACTIVE;
+    case "passive":
+      return ActiveRebalanceMode.PASSIVE;
+    case "hybrid":
+      return ActiveRebalanceMode.HYBRID;
+    default:
+      return defaultMode;
+  }
+}
+
+export const activeRebalanceMode = parseActiveRebalanceMode(configuredActiveRebalanceMode);
+
+const rawActiveRebalanceDeviationBps = process.env.ACTIVE_REBALANCE_RATIO_DEVIATION_BPS;
+const parsedActiveRebalanceDeviationBps =
+  rawActiveRebalanceDeviationBps !== undefined
+    ? Number(rawActiveRebalanceDeviationBps)
+    : 100; // default to 1% = 100 bps deviation around 50/50
+export const activeRebalanceRatioDeviationBps = Number.isFinite(parsedActiveRebalanceDeviationBps)
+  ? Math.max(0, Math.round(parsedActiveRebalanceDeviationBps))
+  : 0;
 
 export const BORROW_RATE = undefined; // TODO
 export const managerFee = 0; // Swap fees taken by the manager (e.g. 0.1 = 10%)

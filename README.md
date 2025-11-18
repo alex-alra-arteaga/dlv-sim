@@ -173,6 +173,8 @@ Charm (ALM solution) parameters:
     - The threshold (in ticks) from the current price to place the limit range position.
 - **period**
     - The number of seconds between each ALM rebalance.
+- **activeRebalanceMode**
+    - Chooses whether ALM rebalances rely on only `Active` swaps, only passive Charm `rebalance`, or `Hybrid` (default). In `Hybrid`, both conditions are checked independently and, when both fire, the active rebalance runs and the passive one is skipped so the vault never double-executes a rebalance. Change the `configuredActiveRebalanceMode` constant in `config.ts` for manual control or override it via the `ACTIVE_REBALANCE_MODE` env var.
 
 DLV config (only relevant if `isDebtNeuralRebalancing` is `false`):
 - **period**

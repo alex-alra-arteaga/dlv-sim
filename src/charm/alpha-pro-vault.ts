@@ -445,6 +445,36 @@ export class AlphaProVault {
     }
   }
 
+  private _computeActiveSwapAmount(priceWad: JSBI, isZeroForOne: boolean): JSBI {
+    const balance0Before = this.getBalance0();
+    const balance1Before = this.getBalance1();
+    const volatileValue = this.volatileToStableValue(balance0Before, priceWad);
+    const stableValue = balance1Before;
+
+    const diff = isZeroForOne
+      ? (JSBI.greaterThan(volatileValue, stableValue) ? JSBI.subtract(volatileValue, stableValue) : ZERO)
+      : (JSBI.greaterThan(stableValue, volatileValue) ? JSBI.subtract(stableValue, volatileValue) : ZERO);
+
+    if (!JSBI.greaterThan(diff, ZERO)) return ZERO;
+
+    const feeFloat = Math.min(Math.max(debtToVolatileSwapFee ?? 0, 0), 1);
+    const feeDen = Number(FEE_DEN.toString());
+    const feeScaled = Math.floor(feeFloat * feeDen);
+    const feeNum = JSBI.BigInt(feeScaled);
+    const twoFeeDen = JSBI.multiply(FEE_DEN, JSBI.BigInt(2));
+    const denom = JSBI.subtract(twoFeeDen, feeNum);
+    ensure(JSBI.greaterThan(denom, ZERO), "Active rebalance denominator invalid");
+
+    const stableValueToSwap = FullMath.mulDivRoundingUp(diff, FEE_DEN, denom);
+
+    if (isZeroForOne) {
+      const volatileToSend = FullMath.mulDivRoundingUp(stableValueToSwap, WAD, priceWad);
+      return JSBI.lessThanOrEqual(volatileToSend, balance0Before) ? volatileToSend : balance0Before;
+    }
+
+    return JSBI.lessThanOrEqual(stableValueToSwap, balance1Before) ? stableValueToSwap : balance1Before;
+  }
+
   private _swapImbalance(
     params: ExternalRebalanceParams,
     label: string,
@@ -689,7 +719,19 @@ export class AlphaProVault {
     await this._assertCanRebalance();
     this._logRebalanceStart("ACTIVE REBALANCE");
     await this._withdrawAllLiquidity(engine);
-    const fee = this._swapImbalance(params, "ACTIVE REBALANCE");
+    // The below 'swapAmount' logic is not internally on the contract to avoid manipulation, and because as well, there needs to be more complex logic that e.g. accounts for swaps that will go through internal liquidity
+    // 
+    const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
+    const swapAmount = this._computeActiveSwapAmount(priceWad, params.isZeroForOne);
+    if (!JSBI.greaterThan(swapAmount, ZERO)) {
+      await this._rebalanceFromIdle(engine, "ACTIVE REBALANCE");
+      return ZERO;
+    }
+    const sizedParams: ExternalRebalanceParams = {
+      ...params,
+      sentAmount: swapAmount,
+    };
+    const fee = this._swapImbalance(sizedParams, "ACTIVE REBALANCE");
     await this._rebalanceFromIdle(engine, "ACTIVE REBALANCE");
     return fee;
   }
