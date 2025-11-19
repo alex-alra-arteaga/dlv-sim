@@ -34,6 +34,10 @@ import {
   minOutPpm
 } from "../utils";
 
+const DEBUG_TOTAL_POOL_VALUE =
+  (process.env.DEBUG_TOTAL_POOL_VALUE ?? "").toLowerCase() === "true" ||
+  process.env.DEBUG_TOTAL_POOL_VALUE === "1";
+
 /** ---------- Vault ---------- */
 
 export interface ExternalRebalanceParams {
@@ -1037,7 +1041,37 @@ export class AlphaProVault {
     const { total0, total1 } = await this.getTotalAmounts();
     const priceWad = this.poolPrice(this.pool.sqrtPriceX96);
     const volatileValueInStable = this.volatileToStableValue(total0, priceWad);
-    return sub(add(total1, volatileValueInStable), this.virtualDebt);
+    const grossValue = add(total1, volatileValueInStable);
+
+    if (DEBUG_TOTAL_POOL_VALUE) {
+      console.log(
+        "[AlphaProVault.totalPoolValue] inputs",
+        JSON.stringify({
+          total0: total0.toString(),
+          total1: total1.toString(),
+          priceWad: priceWad.toString(),
+          volatileValueInStable: volatileValueInStable.toString(),
+          virtualDebt: this.virtualDebt.toString(),
+          grossValue: grossValue.toString(),
+        })
+      );
+    }
+
+    try {
+      return sub(grossValue, this.virtualDebt);
+    } catch (error) {
+      if (DEBUG_TOTAL_POOL_VALUE) {
+        console.error(
+          "[AlphaProVault.totalPoolValue] subtraction failed",
+          JSON.stringify({
+            grossValue: grossValue.toString(),
+            virtualDebt: this.virtualDebt.toString(),
+            error: (error as Error)?.message ?? String(error),
+          })
+        );
+      }
+      throw error;
+    }
   }
 
   // price in WAD (stable per volatile token), agnostic to token ordering; identical to (sqrtP^2 / Q96^2) * 1e18
