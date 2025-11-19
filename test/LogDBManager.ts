@@ -35,12 +35,16 @@ export class LogDBManager {
     this.knex = knexBuilder(config);
   }
 
-  initTables(): Promise<void> {
+  async initTables(): Promise<void> {
     const knex = this.knex;
-    return knex.schema.hasTable("rebalanceLog").then(async (exists: boolean) => {
-      if (!exists) {
-        return knex.schema.createTable(
-          "rebalanceLog",
+    const tableName = "rebalanceLog";
+
+    const ensureTableExists = async () => {
+      const exists = await knex.schema.hasTable(tableName);
+      if (exists) return;
+      try {
+        await knex.schema.createTable(
+          tableName,
           function (t: Knex.TableBuilder) {
             t.increments("id").primary();
             t.string("wide0", 255);
@@ -69,10 +73,18 @@ export class LogDBManager {
             t.text("date");
           }
         );
+      } catch (error) {
+        // Ignore races where another worker created the table first.
+        if (!(error instanceof Error) || !/already exists/i.test(error.message)) {
+          throw error;
+        }
       }
+    };
 
-      // If table exists, ensure all expected columns are present (migration for older DB files)
-      const expectedColumns: { name: string; type: "string" | "text" }[] = [
+    await ensureTableExists();
+
+    // If table exists, ensure all expected columns are present (migration for older DB files)
+    const expectedColumns: { name: string; type: "string" | "text" }[] = [
         { name: "wide0", type: "string" },
         { name: "wide1", type: "string" },
         { name: "base0", type: "string" },
@@ -97,21 +109,19 @@ export class LogDBManager {
         { name: "realizedIL", type: "string" },
         { name: "swapFeesGainedThisPeriod", type: "string" },
         { name: "date", type: "text" },
-      ];
+    ];
 
-      for (const col of expectedColumns) {
+    for (const col of expectedColumns) {
+      // eslint-disable-next-line no-await-in-loop
+      const has = await knex.schema.hasColumn(tableName, col.name);
+      if (!has) {
         // eslint-disable-next-line no-await-in-loop
-        const has = await knex.schema.hasColumn("rebalanceLog", col.name);
-        if (!has) {
-          // eslint-disable-next-line no-await-in-loop
-          await knex.schema.table("rebalanceLog", (t: Knex.TableBuilder) => {
-            if (col.type === "text") t.text(col.name);
-            else t.string(col.name, 255);
-          });
-        }
+        await knex.schema.table(tableName, (t: Knex.TableBuilder) => {
+          if (col.type === "text") t.text(col.name);
+          else t.string(col.name, 255);
+        });
       }
-      return Promise.resolve();
-    });
+    }
   }
 
   persistRebalanceLog(rebalanceLog: RebalanceLog): Promise<number> {

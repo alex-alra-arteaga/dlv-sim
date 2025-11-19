@@ -6,7 +6,7 @@ import { setCurrentPoolConfig, WBTC_USDC_CONFIG } from "./src/pool-config";
 // To use a different pool, change this line to import and set a different configuration
 setCurrentPoolConfig(WBTC_USDC_CONFIG);
 
-export const configLookUpPeriod = LookUpPeriod.FOUR_HOURLY; // Wouldn't recommend changing it, unless your machine is powerful enough
+export const configLookUpPeriod = LookUpPeriod.MINUTELY; // Wouldn't recommend lowering it, unless your machine is powerful enough
 export const isDebtNeuralRebalancing = false; // Whether to enable debt neutral rebalancing
 export const isALMNeuralRebalancing = false; // Whether to override ALM period rebalancing with the neural agent
 export let targetCR = JSBI.BigInt(2e18); // 200% in WAD

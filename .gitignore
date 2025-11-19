@@ -152,3 +152,4 @@ mochawesome-report/
 # any __pycache__ or .venv folders anywhere in the repo
 **/__pycache__/
 **/.venv/
+MATH-US-east-1.pem
