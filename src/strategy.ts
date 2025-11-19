@@ -193,7 +193,18 @@ export async function buildStrategy(
                     // Some historical events cannot be perfectly resolved (e.g. combined internal ops or rounding differences).
                     // Fall back to a best-effort amount so the simulation can continue. This may introduce tiny
                     // parity differences (handled by a relaxed tolerance on post-rebalance checks).
-                    // console.warn('resolveInputFromSwapResultEvent failed, falling back to best-effort amountSpecified:', resolveErr?.message ?? resolveErr);
+                    console.warn(
+                      "[SWAP RESOLVE FALLBACK]",
+                      JSON.stringify({
+                        blockNumber: event.blockNumber,
+                        type: "swap",
+                        amount0: event.amount0.toString(),
+                        amount1: event.amount1.toString(),
+                        originalAmountSpecified: event.amountSpecified.toString(),
+                        sqrtPriceX96: configurableCorePool.getCorePool().sqrtPriceX96.toString(),
+                        error: resolveErr instanceof Error ? resolveErr.message : String(resolveErr),
+                      })
+                    );
                     amountSpecified = zeroForOne ? event.amount0 : event.amount1;
                     sqrtPriceLimitX96 = undefined;
                     // console.log('fallback swap input:', amountSpecified.toString());
