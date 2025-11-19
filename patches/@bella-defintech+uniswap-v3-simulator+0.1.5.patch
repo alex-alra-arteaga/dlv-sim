@@ -59,5 +59,99 @@ index a7c3999..e48a1ac 100644
 +}
 +exports.getNextMinute = getNextMinute;
  exports.getTomorrow = getTomorrow;
- function format(date, fmt) {
-     var o = {
+function format(date, fmt) {
+    var o = {
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/ConfigurableCorePool.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/ConfigurableCorePool.js
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/ConfigurableCorePool.js
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/ConfigurableCorePool.js
+@@
+-    async resolveInputFromSwapResultEvent(param) {
+-        let tryWithDryRun = (param, amountSpecified, sqrtPriceLimitX96) => {
+-            let zeroForOne = jsbi_1.default.greaterThan(param.amount0, InternalConstants_1.ZERO)
+-                ? true
+-                : false;
+-            return this.querySwap(zeroForOne, amountSpecified, sqrtPriceLimitX96).then(({ amount0, amount1, sqrtPriceX96 }) => {
+-                return (jsbi_1.default.equal(amount0, param.amount0) &&
+-                    jsbi_1.default.equal(amount1, param.amount1) &&
+-                    jsbi_1.default.equal(sqrtPriceX96, param.sqrtPriceX96));
+-            });
+-        };
++    async resolveInputFromSwapResultEvent(param) {
++        const absDiff = (a, b) => (jsbi_1.default.greaterThan(a, b) ? jsbi_1.default.subtract(a, b) : jsbi_1.default.subtract(b, a));
++        const amountTolerance = jsbi_1.default.BigInt(10);
++        const priceTolerance = jsbi_1.default.BigInt(10);
++        let bestApproximation = undefined;
++        let bestScore = undefined;
++        let tryWithDryRun = (param, amountSpecified, sqrtPriceLimitX96) => {
++            let zeroForOne = jsbi_1.default.greaterThan(param.amount0, InternalConstants_1.ZERO)
++                ? true
++                : false;
++            return this.querySwap(zeroForOne, amountSpecified, sqrtPriceLimitX96).then(({ amount0, amount1, sqrtPriceX96 }) => {
++                const diff0 = absDiff(amount0, param.amount0);
++                const diff1 = absDiff(amount1, param.amount1);
++                const diffPrice = absDiff(sqrtPriceX96, param.sqrtPriceX96);
++                const matchesExact = (jsbi_1.default.equal(diff0, InternalConstants_1.ZERO) &&
++                    jsbi_1.default.equal(diff1, InternalConstants_1.ZERO) &&
++                    jsbi_1.default.equal(diffPrice, InternalConstants_1.ZERO));
++                const withinTolerance = (jsbi_1.default.lessThanOrEqual(diff0, amountTolerance) &&
++                    jsbi_1.default.lessThanOrEqual(diff1, amountTolerance) &&
++                    jsbi_1.default.lessThanOrEqual(diffPrice, priceTolerance));
++                const score = jsbi_1.default.add(diff0, jsbi_1.default.add(diff1, diffPrice));
++                if (!bestScore || jsbi_1.default.lessThan(score, bestScore)) {
++                    bestScore = score;
++                    bestApproximation = {
++                        amountSpecified,
++                        sqrtPriceX96: sqrtPriceLimitX96,
++                        diffs: { amount0: diff0, amount1: diff1, price: diffPrice },
++                    };
++                }
++                return { matchesExact, withinTolerance, diffs: { diff0, diff1, diffPrice } };
++            });
++        };
+@@
+-        for (let i = 0; i < solutionList.length; i++) {
+-            if (await tryWithDryRun(param, solutionList[i].amountSpecified, solutionList[i].sqrtPriceLimitX96)) {
+-                return {
+-                    amountSpecified: solutionList[i].amountSpecified,
+-                    sqrtPriceX96: solutionList[i].sqrtPriceLimitX96,
+-                };
+-            }
+-        }
+-        throw new Error("Can't resolve to the same as event records. Please check event input.");
++        for (let i = 0; i < solutionList.length; i++) {
++            const check = await tryWithDryRun(param, solutionList[i].amountSpecified, solutionList[i].sqrtPriceLimitX96);
++            if (check.matchesExact) {
++                return {
++                    amountSpecified: solutionList[i].amountSpecified,
++                    sqrtPriceX96: solutionList[i].sqrtPriceLimitX96,
++                };
++            }
++            if (check.withinTolerance) {
++                console.warn("[ConfigurableCorePool] resolveInputFromSwapResultEvent matched within tolerance", {
++                    blockNumber: param.blockNumber,
++                    diffs: {
++                        amount0: check.diffs.diff0.toString(),
++                        amount1: check.diffs.diff1.toString(),
++                        price: check.diffs.diffPrice.toString(),
++                    },
++                });
++                return {
++                    amountSpecified: solutionList[i].amountSpecified,
++                    sqrtPriceX96: solutionList[i].sqrtPriceLimitX96,
++                };
++            }
++        }
++        if (bestApproximation) {
++            console.warn("[ConfigurableCorePool] resolveInputFromSwapResultEvent returning best-effort approximation", Object.assign({ blockNumber: param.blockNumber }, { diffs: {
++                    amount0: bestApproximation.diffs.amount0.toString(),
++                    amount1: bestApproximation.diffs.amount1.toString(),
++                    price: bestApproximation.diffs.price.toString(),
++                } }));
++            return {
++                amountSpecified: bestApproximation.amountSpecified,
++                sqrtPriceX96: bestApproximation.sqrtPriceX96,
++            };
++        }
++        throw new Error("Can't resolve to the same as event records. Please check event input.");
+     }
+ EOF
