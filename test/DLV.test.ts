@@ -14,6 +14,7 @@ import { AlphaProVault, ExternalRebalanceParams } from "../src/charm/alpha-pro-v
 import { getCurrentPoolConfig, PoolConfigManager } from "../src/pool-config";
 import { DebtNeuralAgent } from "../src/neural-agent/debt-neural-agent";
 import { ALMNeuralAgent } from "../src/neural-agent/alm-neural-agent";
+import type { PoolEvent } from "../src/charm/types";
 
 export interface RebalanceLog {
   wide0: number;
@@ -339,6 +340,34 @@ const act = async function (
 ): Promise<void> {
   switch (phase) {
     case Phase.AFTER_NEW_TIME_PERIOD: {
+      const ctxDate = variable.get(CommonVariables.DATE) as Date | undefined;
+      const lastEvent = variable.get(CommonVariables.EVENT) as PoolEvent | undefined;
+      const tick = variable.get(CommonVariables.TICK) as number | undefined;
+      const priceFromPool = vault.pool.sqrtPriceX96.toString();
+      const eventSummary = lastEvent
+        ? {
+            type: lastEvent.type,
+            blockNumber: lastEvent.blockNumber,
+            tick: (lastEvent as { tick?: number }).tick,
+            sqrtPriceX96:
+              (lastEvent as any)?.sqrtPriceX96?.toString?.() ??
+              ((lastEvent as any)?.sqrtPriceX96 !== undefined
+                ? String((lastEvent as any).sqrtPriceX96)
+                : null),
+            date: lastEvent.date?.toISOString?.() ?? String(lastEvent.date),
+          }
+        : undefined;
+      console.log(
+        "[POOL STATE]",
+        JSON.stringify({
+          phase: "AFTER_NEW_TIME_PERIOD",
+          date: ctxDate?.toISOString() ?? null,
+          tick,
+          poolSqrtPriceX96: priceFromPool,
+          event: eventSummary ?? null,
+        })
+      );
+
       const currPrice = vault.poolPrice(vault.pool.sqrtPriceX96);
       const startAmounts = await vault.getTotalAmounts(); // gross token balances now
       const volatileValueInStable = vault.volatileToStableValue(startAmounts.total0, currPrice);
