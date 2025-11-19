@@ -1,0 +1,145 @@
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
+index 2e87b12..b8b95d9 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/client/MainnetDataDownloader.js
+@@ -37,11 +37,18 @@ class MainnetDataDownloader {
+         // BTW, for most cases, it's the same as Initialization event block number. Let's take this now.
+         return this.queryInitializationBlockNumber(poolAddress);
+     }
+-    async queryInitializationBlockNumber(poolAddress) {
+-        let uniswapV3Pool = await this.getCorePoolContarct(poolAddress);
+-        let initializeTopic = uniswapV3Pool.filters.Initialize();
+-        let initializationEvent = await uniswapV3Pool.queryFilter(initializeTopic);
+-        return initializationEvent[0].blockNumber;
++    async queryInitializationBlockNumber(poolAddress, batchSize = 5000) {
++        const pool = await this.getCorePoolContarct(poolAddress);
++        const topic = pool.filters.Initialize();
++        const latest = await this.RPCProvider.getBlockNumber();
++        for (let from = 0; from <= latest; from += (batchSize + 1)) {
++            console.log(`Searching for Initialize event from block ${from} to ${Math.min(from + batchSize, latest)}`);
++            const to = Math.min(from + batchSize, latest);
++            const logs = await pool.queryFilter(topic, from, to);
++            if (logs.length)
++                return logs[0].blockNumber;
++        }
++        throw new Error("Initialize event not found");
+     }
+     async parseEndBlockTypeWhenInit(toBlock, poolAddress) {
+         switch (toBlock) {
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/ConfigurableCorePool.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/ConfigurableCorePool.js
+index a9ec83a..95ccd01 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/ConfigurableCorePool.js
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/core/ConfigurableCorePool.js
+@@ -145,14 +145,35 @@ class ConfigurableCorePool {
+         return Promise.resolve(this.corePool.querySwap(zeroForOne, amountSpecified, sqrtPriceLimitX96));
+     }
+     async resolveInputFromSwapResultEvent(param) {
++        const absDiff = (a, b) => (jsbi_1.default.greaterThan(a, b) ? jsbi_1.default.subtract(a, b) : jsbi_1.default.subtract(b, a));
++        const amountTolerance = jsbi_1.default.BigInt(10);
++        const priceTolerance = jsbi_1.default.BigInt(10);
++        let bestApproximation = undefined;
++        let bestScore = undefined;
+         let tryWithDryRun = (param, amountSpecified, sqrtPriceLimitX96) => {
+             let zeroForOne = jsbi_1.default.greaterThan(param.amount0, InternalConstants_1.ZERO)
+                 ? true
+                 : false;
+             return this.querySwap(zeroForOne, amountSpecified, sqrtPriceLimitX96).then(({ amount0, amount1, sqrtPriceX96 }) => {
+-                return (jsbi_1.default.equal(amount0, param.amount0) &&
+-                    jsbi_1.default.equal(amount1, param.amount1) &&
+-                    jsbi_1.default.equal(sqrtPriceX96, param.sqrtPriceX96));
++                const diff0 = absDiff(amount0, param.amount0);
++                const diff1 = absDiff(amount1, param.amount1);
++                const diffPrice = absDiff(sqrtPriceX96, param.sqrtPriceX96);
++                const matchesExact = (jsbi_1.default.equal(diff0, InternalConstants_1.ZERO) &&
++                    jsbi_1.default.equal(diff1, InternalConstants_1.ZERO) &&
++                    jsbi_1.default.equal(diffPrice, InternalConstants_1.ZERO));
++                const withinTolerance = (jsbi_1.default.lessThanOrEqual(diff0, amountTolerance) &&
++                    jsbi_1.default.lessThanOrEqual(diff1, amountTolerance) &&
++                    jsbi_1.default.lessThanOrEqual(diffPrice, priceTolerance));
++                const score = jsbi_1.default.add(diff0, jsbi_1.default.add(diff1, diffPrice));
++                if (!bestScore || jsbi_1.default.lessThan(score, bestScore)) {
++                    bestScore = score;
++                    bestApproximation = {
++                        amountSpecified,
++                        sqrtPriceX96: sqrtPriceLimitX96,
++                        diffs: { amount0: diff0, amount1: diff1, price: diffPrice },
++                    };
++                }
++                return { matchesExact, withinTolerance, diffs: { diff0, diff1, diffPrice } };
+             });
+         };
+         let solution1 = {
+@@ -193,12 +214,38 @@ class ConfigurableCorePool {
+             solutionList.push(solution2);
+         }
+         for (let i = 0; i < solutionList.length; i++) {
+-            if (await tryWithDryRun(param, solutionList[i].amountSpecified, solutionList[i].sqrtPriceLimitX96)) {
++            const check = await tryWithDryRun(param, solutionList[i].amountSpecified, solutionList[i].sqrtPriceLimitX96);
++            if (check.matchesExact) {
+                 return {
+                     amountSpecified: solutionList[i].amountSpecified,
+                     sqrtPriceX96: solutionList[i].sqrtPriceLimitX96,
+                 };
+             }
++            if (check.withinTolerance) {
++                console.warn("[ConfigurableCorePool] resolveInputFromSwapResultEvent matched within tolerance", {
++                    blockNumber: param.blockNumber,
++                    diffs: {
++                        amount0: check.diffs.diff0.toString(),
++                        amount1: check.diffs.diff1.toString(),
++                        price: check.diffs.diffPrice.toString(),
++                    },
++                });
++                return {
++                    amountSpecified: solutionList[i].amountSpecified,
++                    sqrtPriceX96: solutionList[i].sqrtPriceLimitX96,
++                };
++            }
++        }
++        if (bestApproximation) {
++            console.warn("[ConfigurableCorePool] resolveInputFromSwapResultEvent returning best-effort approximation", Object.assign({ blockNumber: param.blockNumber }, { diffs: {
++                    amount0: bestApproximation.diffs.amount0.toString(),
++                    amount1: bestApproximation.diffs.amount1.toString(),
++                    price: bestApproximation.diffs.price.toString(),
++                } }));
++            return {
++                amountSpecified: bestApproximation.amountSpecified,
++                sqrtPriceX96: bestApproximation.sqrtPriceX96,
++            };
+         }
+         throw new Error("Can't resolve to the same as event records. Please check event input.");
+     }
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
+index 02b6bb1..067101d 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.d.ts
+@@ -2,3 +2,6 @@ export declare function getDate(year: number, month: number, day: number, hour?:
+ export declare function getYesterday(date: Date): Date;
+ export declare function getTomorrow(date: Date): Date;
+ export declare function format(date: Date, fmt: string): string;
++export declare function getNextHour(date: Date): Date;
++export declare function getNextMinute(date: Date): Date;
++export declare function getNext4Hour(date: Date): Date;
+diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
+index a7c3999..6f809a2 100644
+--- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
++++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
+@@ -16,6 +16,18 @@ function getTomorrow(date) {
+     return new Date(date.getTime() + 24 * 60 * 60 * 1000);
+ }
+ exports.getTomorrow = getTomorrow;
++function getNextHour(date) {
++    return new Date(date.getTime() + 60 * 60 * 1000);
++}
++exports.getNextHour = getNextHour;
++function getNext4Hour(date) {
++    return new Date(date.getTime() + 4 * 60 * 60 * 1000);
++}
++exports.getNext4Hour = getNext4Hour;
++function getNextMinute(date) {
++    return new Date(date.getTime() + 60 * 1000);
++}
++exports.getNextMinute = getNextMinute;
+ function format(date, fmt) {
+     var o = {
+         "M+": date.getMonth() + 1,
