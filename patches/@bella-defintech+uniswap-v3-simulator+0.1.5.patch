@@ -124,6 +124,16 @@ diff --git a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUt
 index a7c3999..6f809a2 100644
 --- a/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
 +++ b/node_modules/@bella-defintech/uniswap-v3-simulator/dist/util/DateUtils.js
+@@
+-function getDate(year, month, day, hour = 0, minute = 0, second = 0, millisecond = 0) {
+-    let date = new Date();
+-    date.setFullYear(year, month - 1, day);
+-    date.setHours(hour, minute, second, millisecond);
+-    return date;
+-}
++function getDate(year, month, day, hour = 0, minute = 0, second = 0, millisecond = 0) {
++    return new Date(Date.UTC(year, month - 1, day, hour, minute, second, millisecond));
++}
 @@ -16,6 +16,18 @@ function getTomorrow(date) {
      return new Date(date.getTime() + 24 * 60 * 60 * 1000);
  }
