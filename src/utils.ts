@@ -193,10 +193,6 @@ export const abs  = (x: JSBI) => (isNeg(x) ? neg(x) : x);
 export function minJSBI(a: JSBI, b: JSBI) { return JSBI.lessThan(a, b) ? a : b; }
 export function maxJSBI(a: JSBI, b: JSBI) { return JSBI.greaterThan(a, b) ? a : b; }
 
-export const toIsoZ = (d: Date) => new Date(d.getTime()).toISOString().slice(0, 19) + "Z";
-export const dateUtc = (y: number, m1: number, d: number) => new Date(Date.UTC(y, m1 - 1, d, 0, 0, 0, 0));
-export const fmtUTC = toIsoZ;
-
 // per-million cut of x (ppm e.g. 10 = 10ppm = 1/100000)
 function cutPpm(x: JSBI, ppm: number): JSBI {
   if (isNeg(x) || ppm <= 0) return JZERO;
