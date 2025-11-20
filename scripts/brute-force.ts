@@ -185,6 +185,7 @@ type RebalanceStep = {
   rebalanceType?: string;
   volatileAssetPrice: string;
   debt: string;
+  timestampMs?: number;
 };
 
 const formatCharmForOutput = (cfg: Charm): CharmOutput => {
@@ -223,6 +224,7 @@ async function snapshotRebalanceDb(runKey: string): Promise<string | undefined> 
 }
 
 function mapRowToStep(row: RawRebalanceRow, _: number): RebalanceStep {
+  const timestampMs = row.date ? Date.parse(row.date) : undefined;
   return {
     token0: strOrZero(row.total0),
     token1: strOrZero(row.total1),
@@ -231,6 +233,7 @@ function mapRowToStep(row: RawRebalanceRow, _: number): RebalanceStep {
     rebalanceType: optionalString(row.rebalanceType),
     volatileAssetPrice: strOrZero(row.nonVolatileAssetPrice),
     debt: strOrZero(row.debt),
+    timestampMs: Number.isFinite(timestampMs) ? timestampMs : undefined,
   };
 }
 
