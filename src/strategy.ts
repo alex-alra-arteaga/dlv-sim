@@ -7,6 +7,7 @@ import {
   SimulationDataManager,
   SimulatorClient,
   SQLiteSimulationDataManager,
+  TickMath,
   getTomorrow,
   getNextHour,
   getNextMinute,
@@ -200,12 +201,18 @@ export async function buildStrategy(
           break;
         case EventType.SWAP:
             {
-              const zeroForOne: boolean = JSBI.lessThan(event.amount0, JSBI.BigInt(0));
+              // In Uniswap V3 Swap events, amount0/amount1 are the pool's balance deltas:
+              // amount0 > 0 means token0 flowed into the pool (zeroForOne swap: 0 -> 1),
+              // amount0 < 0 means token0 flowed out (oneForZero swap: 1 -> 0).
+              // Use amount1 as a fallback to handle rare zero amount0 entries.
+              const zeroForOne: boolean = JSBI.notEqual(event.amount0, JSBI.BigInt(0))
+                ? JSBI.greaterThan(event.amount0, JSBI.BigInt(0))
+                : JSBI.lessThan(event.amount1, JSBI.BigInt(0));
               try {
                 // Prefer recorded amountSpecified; fall back to resolver if missing.
                 let amountSpecified = event.amountSpecified;
                 // Use recorded target price to anchor parity: for zeroForOne (token0 in), limit must be <= current sqrt, for oneForZero, limit must be >= current sqrt.
-                // We set it to the recorded event sqrtPriceX96 so the swap lands on-chain price.
+                // Start from the recorded event sqrtPriceX96 and clamp it if it violates simulator bounds.
                 let sqrtPriceLimitX96: any = event.sqrtPriceX96;
 
                 if (!amountSpecified || JSBI.equal(amountSpecified, JSBI.BigInt(0))) {
@@ -237,6 +244,37 @@ export async function buildStrategy(
                 } catch (qerr) {
                   // const _qe: any = qerr;
                   // console.warn('querySwap failed:', _qe?.message ?? _qe);
+                }
+
+                // Ensure the price limit is on the correct side of the current price to satisfy simulator assertions.
+                const corePoolView = configurableCorePool.getCorePool();
+                const currentSqrtPriceX96 = corePoolView.sqrtPriceX96;
+                const ONE = JSBI.BigInt(1);
+                const MIN_SQRT = (TickMath as any).MIN_SQRT_RATIO;
+                const MAX_SQRT = (TickMath as any).MAX_SQRT_RATIO;
+                const bumpDown = () => JSBI.greaterThan(currentSqrtPriceX96, MIN_SQRT)
+                  ? JSBI.subtract(currentSqrtPriceX96, ONE)
+                  : JSBI.add(MIN_SQRT, ONE);
+                const bumpUp = () => JSBI.lessThan(currentSqrtPriceX96, MAX_SQRT)
+                  ? JSBI.add(currentSqrtPriceX96, ONE)
+                  : JSBI.subtract(MAX_SQRT, ONE);
+
+                if (!sqrtPriceLimitX96) {
+                  sqrtPriceLimitX96 = zeroForOne ? bumpDown() : bumpUp();
+                } else if (zeroForOne) {
+                  if (!JSBI.lessThan(sqrtPriceLimitX96, currentSqrtPriceX96)) {
+                    sqrtPriceLimitX96 = bumpDown();
+                  }
+                  if (!JSBI.greaterThan(sqrtPriceLimitX96, MIN_SQRT)) {
+                    sqrtPriceLimitX96 = JSBI.add(MIN_SQRT, ONE);
+                  }
+                } else {
+                  if (!JSBI.greaterThan(sqrtPriceLimitX96, currentSqrtPriceX96)) {
+                    sqrtPriceLimitX96 = bumpUp();
+                  }
+                  if (!JSBI.lessThan(sqrtPriceLimitX96, MAX_SQRT)) {
+                    sqrtPriceLimitX96 = JSBI.subtract(MAX_SQRT, ONE);
+                  }
                 }
 
                 await configurableCorePool.swap(zeroForOne, amountSpecified, sqrtPriceLimitX96);
