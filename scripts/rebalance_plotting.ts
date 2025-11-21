@@ -41,7 +41,7 @@ const CONFIG = {
   poolDisplayName: poolConfig.getDisplayName(),
 
   // fixed end date (inclusive)
-  endDateUtc: dayjs.utc("2024-12-15").endOf("day").valueOf(),
+  endDateUtc: dayjs.utc("2025-11-22").endOf("day").valueOf(),
 
   // date parsing formats used by DB 'date' column
   dateFormats: [
@@ -211,12 +211,13 @@ function postProcessSwapFees(row: ParsedRow): ParsedRow {
 }
 
 // batching utilities
-type Grain = "raw" | "day" | "week" | "month";
+type Grain = "raw" | "hour" | "day" | "week" | "month";
 type Series = ParsedRow[];
 
 function floorToGrain(tsMs: number, g: Grain): number {
   const d = dayjs.utc(tsMs);
   switch (g) {
+    case "hour": return d.startOf("hour").valueOf();
     case "day": return d.startOf("day").valueOf();
     case "week": return d.startOf("week").valueOf();
     case "month": return d.startOf("month").valueOf();
@@ -274,7 +275,7 @@ function aggregate(rows: Series, g: Grain): Series {
   return out;
 }
 
-function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: Series; a0: string; a1: string; volatileSymbol: string; stableSymbol: string; debtAgentEnabled: boolean }): string {
+function htmlTemplate(payload: { raw: Series; hour: Series; day: Series; week: Series; month: Series; a0: string; a1: string; volatileSymbol: string; stableSymbol: string; debtAgentEnabled: boolean }): string {
   const dataJSON = JSON.stringify(payload);
   return `<!doctype html>
 <html lang="en">
@@ -304,6 +305,8 @@ function htmlTemplate(payload: { raw: Series; day: Series; week: Series; month: 
   <div class="controls">
     <label><strong>Batching</strong>
       <select id="grain">
+        <option value="raw">Per rebalance</option>
+        <option value="hour" selected>Hourly</option>
         <option value="day">Daily</option>
         <option value="week">Weekly</option>
         <option value="month">Monthly</option>
@@ -414,7 +417,10 @@ function almFeesSeries(data){
   const cumFees = [];
   let acc = 0;
   for (const d of data){ acc += d[key] || 0; cumFees.push(acc); }
-  const pct = data.map((d,i) => d.vaultValue ? (cumFees[i] / d.vaultValue) : 0);
+  const pct = data.map((d,i) => {
+    if (!d.vaultValue) return 0;
+    return (cumFees[i] / d.vaultValue) * 100;
+  });
 
   return [
     { ...hoverLines, name:\`Active rebalance cumulative fees (\${PAYLOAD.stableSymbol})\`, x, y:cumFees, line:{color:'#7c3aed'} },
@@ -478,7 +484,10 @@ function feesSeries(data){
   const cumFees = [];
   let acc = 0;
   for (const d of data){ acc += d[\`fee\${PAYLOAD.stableSymbol}\`] || 0; cumFees.push(acc); }
-  const pct = data.map((d,i) => d.vaultValue ? (cumFees[i] / d.vaultValue) : 0);
+  const pct = data.map((d,i) => {
+    if (!d.vaultValue) return 0;
+    return (cumFees[i] / d.vaultValue) * 100;
+  });
 
   return [
     { ...hoverLines, name:\`Cumulative fees (\${PAYLOAD.stableSymbol})\`, x, y:cumFees, line:{color:'var(--blue)'} },
@@ -580,7 +589,7 @@ function layout(title, yTitle, y2Title=null){
   };
 }
 
-function render(grain='raw'){
+function render(grain='hour'){
   const data = PAYLOAD[grain];
 
   Plotly.react('perf',   perfSeries(data, grain),   layout('Vault vs Hold', '% Return'));
@@ -637,6 +646,7 @@ async function main() {
 
     const payload = {
       raw: parsedAll,
+      hour: aggregate(parsedAll, "hour"),
       day: aggregate(parsedAll, "day"),
       week: aggregate(parsedAll, "week"),
       month: aggregate(parsedAll, "month"),

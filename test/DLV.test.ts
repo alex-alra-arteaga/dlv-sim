@@ -115,8 +115,8 @@ describe("DLV Strategy", function () {
     let charmRebalancePeriod = charmConfig.period / configLookUpPeriod;
     let dlvRebalancePeriod = dlvConfig.period ? dlvConfig.period / configLookUpPeriod : Number(MaxUint128);
 
-    let startDate = getDate(2021, 5, 6);
-    let endDate = getDate(2024, 12, 15);
+    let startDate = getDate(2025, 10, 8);
+    let endDate = getDate(2025, 11, 22);
 
     // // For brute-force testing, use shorter period to speed up execution
     // if (process.env.BRUTE_FORCE === 'true') {

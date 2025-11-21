@@ -55,6 +55,7 @@ const HEAP_MB = Number(args.heapMB ?? 18192);
 const PROJECT_ROOT = process.cwd();
 const RESULTS_PATH = path.join(PROJECT_ROOT, "brute-force-results.jsonl");
 const IS_ACTIVE_REBALANCE = activeRebalanceMode === ActiveRebalanceMode.ACTIVE;
+const IS_HYBRID_REBALANCE = activeRebalanceMode === ActiveRebalanceMode.HYBRID;
 const CAPTURE_REBALANCE_DETAILS = parseBooleanFlag(args.captureRebalanceDetails);
 const fsp = fs.promises;
 const poolConfig = getCurrentPoolConfig();
@@ -133,6 +134,23 @@ const scaledSeedBounds = (lo: number, hi: number): [number, number] => {
 };
 const maybeThinSeedBounds = (lo: number, hi: number): [number, number] =>
   IS_ACTIVE_REBALANCE ? scaledSeedBounds(lo, hi) : [lo, hi];
+
+function hybridDeviationCandidates(level: Level): number[] {
+  switch (level) {
+    case "air":
+      return [100, 200, 300, 400, 500]; // 1% - 5%
+    case "light":
+      return [300, 500, 700, 900, 1100]; // ~3% - 11%
+    case "standard":
+      return [500, 750, 1000, 1250, 1500]; // 5% - 15%
+    case "heavy":
+      return [800, 1000, 1200, 1400, 1600, 1800]; // 8% - 18%
+    case "extreme":
+      return [100, 300, 500, 700, 900, 1100, 1300, 1500, 1700, 1900, 2000]; // 1% - 20%
+    default:
+      return [1000];
+  }
+}
 
 // ---- parameter grids per level ----
 // constraints (reasonable defaults):
@@ -295,6 +313,7 @@ function grids(level: Level) {
   let weights: number[] = [];
   // let dlvPeriods: Array<number|undefined> = [];
   let devs: number[] = [];
+  const hybridDeviationBps = IS_HYBRID_REBALANCE ? hybridDeviationCandidates(level) : [];
 
   switch (level) {
     case "air": {
@@ -394,15 +413,23 @@ function grids(level: Level) {
     dlv.push(next);
   }
 
-  return { charm, dlv };
+  return { charm, dlv, hybridDeviationBps };
 }
 
 // ---- runner ----
-function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolean; apy?: any; stdout?: string; stderr?: string }> {
+function runOnce(
+  charm: Charm,
+  dlv: DLV,
+  workerId: number,
+  hybridDeviationBps?: number
+): Promise<{ ok: boolean; apy?: any; stdout?: string; stderr?: string }> {
   console.log(`[BRUTE-FORCE] [W${workerId}] Starting run with charm config:`, JSON.stringify(formatCharmForOutput(charm)));
   const dlvLog = formatDLVForOutput(dlv);
   if (dlvLog !== undefined) {
     console.log(`[BRUTE-FORCE] [W${workerId}] DLV config:`, JSON.stringify(dlvLog));
+  }
+  if (hybridDeviationBps !== undefined) {
+    console.log(`[BRUTE-FORCE] [W${workerId}] Active rebal deviation: ${hybridDeviationBps} bps (~${(hybridDeviationBps / 100).toFixed(2)}%)`);
   }
 
   const mochaCmd = [
@@ -451,6 +478,10 @@ function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolea
     }),
   } as NodeJS.ProcessEnv;
 
+  if (hybridDeviationBps !== undefined) {
+    env.ACTIVE_REBALANCE_RATIO_DEVIATION_BPS = String(hybridDeviationBps);
+  }
+
   return new Promise((resolve) => {
     const child = spawn(mochaCmd[0], mochaCmd.slice(1), {
       env,
@@ -495,12 +526,19 @@ function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolea
 
 // ---- main brute-force ----
 (async function main() {
-  const { charm, dlv } = grids(LEVEL);
+  const { charm, dlv, hybridDeviationBps } = grids(LEVEL);
+  const hybridDeviationValues = IS_HYBRID_REBALANCE && hybridDeviationBps.length
+    ? hybridDeviationBps
+    : [undefined];
 
-  const combos: Array<{charm: Charm; dlv: DLV}> = [];
-  // Cartesian product of all charm and dlv configurations
-  for (const c of charm) for (const d of dlv) {
-    combos.push({ charm: c, dlv: d });
+  const combos: Array<{charm: Charm; dlv: DLV; hybridDeviationBps?: number}> = [];
+  // Cartesian product of all charm, dlv, and (if applicable) hybrid deviation configurations
+  for (const c of charm) {
+    for (const d of dlv) {
+      for (const hybridBps of hybridDeviationValues) {
+        combos.push({ charm: c, dlv: d, hybridDeviationBps: hybridBps });
+      }
+    }
   }
 
   // trim for "extreme" using quasi-random subsample if cap set
@@ -561,17 +599,18 @@ function runOnce(charm: Charm, dlv: DLV, workerId: number): Promise<{ ok: boolea
       const idx = queue.shift();
       if (idx === undefined) return;
 
-      const { charm: c, dlv: d } = combos[idx];
+      const { charm: c, dlv: d, hybridDeviationBps: hybridBps } = combos[idx];
       const key = crypto.createHash("sha1").update(JSON.stringify({ c, d })).digest("hex").slice(0, 12);
       console.log(`[BRUTE-FORCE PROGRESS] [W${wid}] Starting run ${runCount + 1}/${indices.length} key=${key}`);
       const started = Date.now();
-      const res = await runOnce(c, d, wid);
+      const res = await runOnce(c, d, wid, hybridBps);
       const ms = Date.now() - started;
 
       const row = {
         key, level: LEVEL, tickSpacing: TICK_SPACING, poolFeeBps: POOL_FEE_TIER,
         charm: formatCharmForOutput(c),
         dlv: formatDLVForOutput(d),
+        activeRebalanceDeviationBps: hybridBps ?? null,
         ok: res.ok,
         apy: res.ok ? res.apy : null,
         err: res.ok ? null : { stdout: res.stdout, stderr: res.stderr },

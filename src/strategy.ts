@@ -82,8 +82,21 @@ export async function buildStrategy(
       swap, collect). If the user choose to trigger it, we run the act callback 
       then repeat the steps above until the endDate comes.
     */
-  async function backtest(startDate: Date, endDate: Date, lookupPeriod: LookUpPeriod): Promise<void> {
-    const fmtUTC = (d: Date) => formatInTimeZone(d, 'UTC', 'yyyy-MM-dd HH:mm:ss');
+    async function backtest(startDate: Date, endDate: Date, lookupPeriod: LookUpPeriod): Promise<void> {
+      const fmtUTC = (d: Date) => formatInTimeZone(d, 'UTC', 'yyyy-MM-dd HH:mm:ss');
+    const logParityWindow = async (start: Date, end: Date) => {
+      try {
+        const swaps = await eventDB.getSwapEventsByDate(fmtUTC(start), fmtUTC(end));
+        let dbMinTick = Number.POSITIVE_INFINITY;
+        let dbMaxTick = Number.NEGATIVE_INFINITY;
+        for (const s of swaps) {
+          if (s.tick < dbMinTick) dbMinTick = s.tick;
+          if (s.tick > dbMaxTick) dbMaxTick = s.tick;
+        }
+      } catch (err) {
+        console.warn("[PARITY] failed to compute min/max tick for window", err);
+      }
+    };
 
     // initial environment
     async function* streamEventsByDate(
@@ -134,7 +147,18 @@ export async function buildStrategy(
     // This is an implementation of Engine interface based on the Tuner.
     let engine = await buildDryRunEngine(configurableCorePool);
 
-    // First vault deposit to which we compare strategy performance
+    // Warm-up: replay all historical events up to startDate to bring pool state current,
+    // but do NOT run strategy actions during warm-up.
+    const warmupStart = new Date(0); // epoch → earliest recorded event
+    if (startDate > warmupStart) {
+      console.log(`[WARMUP] Replaying events up to ${fmtUTC(startDate)}`);
+      for await (const event of streamEventsByDate(warmupStart, startDate)) {
+        await replayEvent(event);
+      }
+      console.log("[WARMUP] Completed");
+    }
+
+    // First vault deposit to which we compare strategy performance (after warm-up state)
     await initializeAccountVault(account, engine);
 
     async function replayEvent(
@@ -176,26 +200,28 @@ export async function buildStrategy(
           break;
         case EventType.SWAP:
             {
-              const zeroForOne: boolean = JSBI.greaterThan(event.amount0, JSBI.BigInt(0)) ? true : false;
+              const zeroForOne: boolean = JSBI.lessThan(event.amount0, JSBI.BigInt(0));
               try {
-                // If amountSpecified is zero in historical events, we need to resolve the actual swap input
-                // that produced the recorded event. The simulator provides a helper for this.
+                // Prefer recorded amountSpecified; fall back to resolver if missing.
                 let amountSpecified = event.amountSpecified;
-                let sqrtPriceLimitX96: any = undefined;
+                // Use recorded target price to anchor parity: for zeroForOne (token0 in), limit must be <= current sqrt, for oneForZero, limit must be >= current sqrt.
+                // We set it to the recorded event sqrtPriceX96 so the swap lands on-chain price.
+                let sqrtPriceLimitX96: any = event.sqrtPriceX96;
 
-                if (JSBI.equal(amountSpecified, JSBI.BigInt(0))) {
+                if (!amountSpecified || JSBI.equal(amountSpecified, JSBI.BigInt(0))) {
                   try {
                     const resolved = await configurableCorePool.resolveInputFromSwapResultEvent(event as any);
                     // resolved: { amountSpecified, sqrtPriceX96 }
                     amountSpecified = resolved.amountSpecified;
-                    sqrtPriceLimitX96 = resolved.sqrtPriceX96;
+                    // prefer recorded limit; keep resolver price only if we had none
+                    if (!sqrtPriceLimitX96) sqrtPriceLimitX96 = resolved.sqrtPriceX96;
                   } catch (resolveErr) {
                     // Some historical events cannot be perfectly resolved (e.g. combined internal ops or rounding differences).
                     // Fall back to a best-effort amount so the simulation can continue. This may introduce tiny
                     // parity differences (handled by a relaxed tolerance on post-rebalance checks).
                     // console.warn('resolveInputFromSwapResultEvent failed, falling back to best-effort amountSpecified:', resolveErr?.message ?? resolveErr);
                     amountSpecified = zeroForOne ? event.amount0 : event.amount1;
-                    sqrtPriceLimitX96 = undefined;
+                    sqrtPriceLimitX96 = sqrtPriceLimitX96 ?? undefined;
                     // console.log('fallback swap input:', amountSpecified.toString());
                   }
                 }
@@ -239,6 +265,7 @@ export async function buildStrategy(
     while (currDate < endDate) {
       // update common view
       variable.set(CommonVariables.DATE, currDate);
+      await logParityWindow(currDate, getNextTime(currDate));
       console.log(currDate);
       // allow update custom cache no matter act is being triggered or not
       cache(Phase.AFTER_NEW_TIME_PERIOD, variable);

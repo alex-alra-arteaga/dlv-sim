@@ -21,6 +21,7 @@ const numericFeatureMeta = [
   { key: "deviationThresholdBelow", label: "Deviation ↓" },
   { key: "dlvPeriod", label: "DLV period (s)" },
   { key: "debtToVolatileSwapFee", label: "Debt↔Vol swap fee" },
+  { key: "activeRebalanceDeviationBps", label: "Active deviation (bps)" },
 ];
 
 const registeredPlots = new Set();
@@ -132,6 +133,7 @@ function renderLeaderboard() {
     "Deviation ↑",
     "Deviation ↓",
     "DLV swap fee",
+    "Active deviation",
   ];
 
   const html = ["<table>", "<thead><tr>" + headers.map((h) => `<th>${h}</th>`).join("") + "</tr></thead>"];
@@ -151,6 +153,7 @@ function renderLeaderboard() {
         <td>${formatPercent(row.deviationThresholdAbove)}</td>
         <td>${formatPercent(row.deviationThresholdBelow)}</td>
         <td>${formatPercent(row.debtToVolatileSwapFee, 4)}</td>
+        <td>${formatPercent(row.activeRebalanceDeviationBps != null ? row.activeRebalanceDeviationBps / 100 : null)}</td>
       </tr>`
     );
   }

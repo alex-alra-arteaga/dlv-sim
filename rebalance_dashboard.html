@@ -26,6 +26,8 @@
   <div class="controls">
     <label><strong>Batching</strong>
       <select id="grain">
+        <option value="raw">Per rebalance</option>
+        <option value="hour" selected>Hourly</option>
         <option value="day">Daily</option>
         <option value="week">Weekly</option>
         <option value="month">Monthly</option>
@@ -136,7 +138,10 @@ function almFeesSeries(data){
   const cumFees = [];
   let acc = 0;
   for (const d of data){ acc += d[key] || 0; cumFees.push(acc); }
-  const pct = data.map((d,i) => d.vaultValue ? (cumFees[i] / d.vaultValue) : 0);
+  const pct = data.map((d,i) => {
+    if (!d.vaultValue) return 0;
+    return (cumFees[i] / d.vaultValue) * 100;
+  });
 
   return [
     { ...hoverLines, name:`Active rebalance cumulative fees (${PAYLOAD.stableSymbol})`, x, y:cumFees, line:{color:'#7c3aed'} },
@@ -200,7 +205,10 @@ function feesSeries(data){
   const cumFees = [];
   let acc = 0;
   for (const d of data){ acc += d[`fee${PAYLOAD.stableSymbol}`] || 0; cumFees.push(acc); }
-  const pct = data.map((d,i) => d.vaultValue ? (cumFees[i] / d.vaultValue) : 0);
+  const pct = data.map((d,i) => {
+    if (!d.vaultValue) return 0;
+    return (cumFees[i] / d.vaultValue) * 100;
+  });
 
   return [
     { ...hoverLines, name:`Cumulative fees (${PAYLOAD.stableSymbol})`, x, y:cumFees, line:{color:'var(--blue)'} },
@@ -302,7 +310,7 @@ function layout(title, yTitle, y2Title=null){
   };
 }
 
-function render(grain='raw'){
+function render(grain='hour'){
   const data = PAYLOAD[grain];
 
   Plotly.react('perf',   perfSeries(data, grain),   layout('Vault vs Hold', '% Return'));

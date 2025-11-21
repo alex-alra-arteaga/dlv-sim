@@ -31,6 +31,7 @@ interface BruteForceRow {
   deviationThresholdBelow: number | null;
   dlvPeriod: number | null;
   debtToVolatileSwapFee: number | null;
+  activeRebalanceDeviationBps: number | null;
 }
 
 type RawRow = Record<string, unknown>;
@@ -43,6 +44,9 @@ const dataset: BruteForceRow[] = successful.map((rowAny) => {
   const charm = (row.charm ?? {}) as Record<string, any>;
   const dlv = (row.dlv ?? {}) as Record<string, any>;
   const apy = (row.apy ?? {}) as Record<string, any>;
+  const activeDeviationBps = row.activeRebalanceDeviationBps != null
+    ? Number(row.activeRebalanceDeviationBps)
+    : null;
   return {
     key: String(row.key ?? ""),
     diff: Number(apy.diff ?? 0),
@@ -57,6 +61,7 @@ const dataset: BruteForceRow[] = successful.map((rowAny) => {
     deviationThresholdBelow: dlv.deviationThresholdBelow != null ? Number(dlv.deviationThresholdBelow) : null,
     dlvPeriod: dlv.period != null ? Number(dlv.period) : null,
     debtToVolatileSwapFee: dlv.debtToVolatileSwapFee != null ? Number(dlv.debtToVolatileSwapFee) : null,
+    activeRebalanceDeviationBps: activeDeviationBps,
   };
 });
 
